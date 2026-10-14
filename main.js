@@ -15,7 +15,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // CENÁRIO
     // =========================
-
     this.add.rectangle(900, 600, this.mapWidth, this.mapHeight, 0x292a25);
 
     const tiles = this.add.graphics();
@@ -32,7 +31,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // PAREDES
     // =========================
-
     this.walls = [];
 
     const addWall = (x, y, w, h) => {
@@ -63,7 +61,7 @@ class AsylumScene extends Phaser.Scene {
     addWall(750, 850, 300, 24);
     addWall(1150, 850, 300, 24);
 
-    // Janelas
+    // JANELAS
     for (const x of [250, 700, 1100, 1550]) {
       this.add.rectangle(x, 110, 90, 65, 0x08090b).setStrokeStyle(5, 0x777368);
 
@@ -75,7 +73,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // CRIANÇA
     // =========================
-
     this.player = this.add.container(110, 250);
 
     this.player.add([
@@ -95,7 +92,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // FREIRA
     // =========================
-
     this.nun = this.add.container(1550, 1000);
 
     this.nun.add([
@@ -117,7 +113,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // COLISÕES
     // =========================
-
     for (const wall of this.walls) {
       this.physics.add.collider(this.player, wall);
       this.physics.add.collider(this.nun, wall);
@@ -126,7 +121,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // CHAVE
     // =========================
-
     this.keyItem = this.add.star(1450, 250, 5, 7, 15, 0xe4c56a);
 
     this.physics.add.existing(this.keyItem, true);
@@ -143,7 +137,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // SAÍDA
     // =========================
-
     this.exit = this.add.rectangle(1690, 1080, 70, 90, 0x522d2d);
 
     this.exit.setStrokeStyle(4, 0x98756b);
@@ -159,28 +152,29 @@ class AsylumScene extends Phaser.Scene {
       }
     });
 
+    // A freira captura a criança.
     this.physics.add.overlap(this.player, this.nun, () => this.finish(false));
 
     // =========================
     // CONTROLES
     // =========================
-
     this.keys = this.input.keyboard.addKeys("W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT");
 
     // =========================
     // CÂMERA
     // =========================
-
     this.cameras.main.setBounds(0, 0, this.mapWidth, this.mapHeight);
 
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
 
     // =========================
-    // ILUMINAÇÃO CORRIGIDA
+    // ILUMINAÇÃO
     // =========================
+    // Remove a textura antiga ao reiniciar a cena.
+    if (this.textures.exists("asylumDarkness")) {
+      this.textures.remove("asylumDarkness");
+    }
 
-    // A textura tem o mesmo tamanho da área visível.
-    // O centro transparente é redesenhado a cada quadro.
     this.darkTexture = this.textures.createCanvas(
       "asylumDarkness",
       this.scale.width,
@@ -191,11 +185,8 @@ class AsylumScene extends Phaser.Scene {
 
     this.darkness = this.add.image(0, 0, "asylumDarkness");
 
-    this.darkness.setOrigin(0, 0);
-    this.darkness.setScrollFactor(0);
-    this.darkness.setDepth(90);
+    this.darkness.setOrigin(0, 0).setScrollFactor(0).setDepth(90);
 
-    // Brilho sutil, sem a luz branca gigante.
     this.glow = this.add.graphics();
     this.glow.setScrollFactor(0);
     this.glow.setDepth(89);
@@ -203,7 +194,6 @@ class AsylumScene extends Phaser.Scene {
     // =========================
     // INTERFACE
     // =========================
-
     this.add
       .text(20, 15, "♥", {
         fontSize: "32px",
@@ -235,9 +225,8 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // =========================
-  // LUZ: RECORTE TRANSPARENTE
+  // ILUMINAÇÃO DINÂMICA
   // =========================
-
   updateLighting() {
     if (!this.darkContext || !this.player) return;
 
@@ -249,15 +238,14 @@ class AsylumScene extends Phaser.Scene {
     const x = this.player.x - camera.scrollX;
     const y = this.player.y - camera.scrollY;
 
-    // Primeiro cobre a tela com escuridão.
+    // Escurece toda a tela.
     ctx.globalCompositeOperation = "source-over";
     ctx.clearRect(0, 0, width, height);
 
     ctx.fillStyle = "rgba(0, 0, 0, 0.94)";
     ctx.fillRect(0, 0, width, height);
 
-    // Apaga a escuridão gradualmente ao redor da criança.
-    // destination-out cria transparência real.
+    // Abre um foco de luz suave.
     ctx.globalCompositeOperation = "destination-out";
 
     const gradient = ctx.createRadialGradient(x, y, 8, x, y, this.lightRadius);
@@ -269,6 +257,7 @@ class AsylumScene extends Phaser.Scene {
     gradient.addColorStop(1, "rgba(0,0,0,0)");
 
     ctx.fillStyle = gradient;
+
     ctx.fillRect(
       x - this.lightRadius,
       y - this.lightRadius,
@@ -276,21 +265,20 @@ class AsylumScene extends Phaser.Scene {
       this.lightRadius * 2,
     );
 
-    // Restaura a composição normal e atualiza a textura.
     ctx.globalCompositeOperation = "source-over";
+
     this.darkTexture.refresh();
 
-    // Brilho dourado sutil na área iluminada.
+    // Brilho dourado discreto.
     this.glow.clear();
-
     this.glow.fillStyle(0xffe4a8, 0.035);
+
     this.glow.fillCircle(x, y, this.lightRadius * 0.65);
   }
 
   // =========================
-  // ATUALIZAÇÃO DO JOGO
+  // MOVIMENTAÇÃO E IA
   // =========================
-
   update() {
     if (this.gameOver) return;
 
@@ -309,7 +297,7 @@ class AsylumScene extends Phaser.Scene {
 
     this.player.body.setVelocity((dx / length) * speed, (dy / length) * speed);
 
-    // Perseguição da freira.
+    // A freira persegue a criança.
     const angle = Phaser.Math.Angle.Between(
       this.nun.x,
       this.nun.y,
@@ -323,22 +311,23 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // =========================
-  // FIM DE JOGO
+  // VITÓRIA, DERROTA E RECOMEÇO
   // =========================
-
   finish(won) {
     if (this.gameOver) return;
 
     this.gameOver = true;
     this.physics.pause();
 
-    this.add
-      .rectangle(480, 280, 520, 180, 0x080808, 0.96)
-      .setScrollFactor(0)
-      .setDepth(200);
+    // Painel de fim de jogo.
+    const panel = this.add.rectangle(480, 280, 520, 230, 0x080808, 0.97);
 
+    panel.setScrollFactor(0);
+    panel.setDepth(200);
+
+    // Título.
     this.add
-      .text(480, 260, won ? "VOCÊ ESCAPOU" : "FIM DE JOGO", {
+      .text(480, 225, won ? "VOCÊ ESCAPOU" : "FIM DE JOGO", {
         fontFamily: "Georgia",
         fontSize: "30px",
         color: won ? "#d8c18a" : "#d34b4b",
@@ -347,21 +336,59 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(201);
 
+    // Mensagem.
     this.add
-      .text(480, 315, "Recarregue a página para jogar novamente.", {
-        fontSize: "14px",
-        color: "#eeeeee",
-      })
+      .text(
+        480,
+        275,
+        won ? "Você conseguiu fugir do asilo!" : "A freira capturou você...",
+        {
+          fontSize: "15px",
+          color: "#eeeeee",
+        },
+      )
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(201);
+
+    // Botão RECOMEÇAR.
+    const restartButton = this.add
+      .text(480, 335, "⟳  RECOMEÇAR", {
+        fontFamily: "Arial",
+        fontSize: "20px",
+        color: "#ffffff",
+        backgroundColor: "#762d2d",
+        padding: { x: 22, y: 12 },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(202)
+      .setInteractive({ useHandCursor: true });
+
+    // Efeito ao passar o mouse.
+    restartButton.on("pointerover", () => {
+      restartButton.setStyle({
+        backgroundColor: "#a33b3b",
+      });
+    });
+
+    restartButton.on("pointerout", () => {
+      restartButton.setStyle({
+        backgroundColor: "#762d2d",
+      });
+    });
+
+    // Evita cliques repetidos e reinicia a cena.
+    restartButton.on("pointerdown", () => {
+      restartButton.disableInteractive();
+      this.scene.restart();
+    });
   }
 }
 
 // =========================
 // CONFIGURAÇÃO PHASER
 // =========================
-
 const config = {
   type: Phaser.AUTO,
   parent: "game",
