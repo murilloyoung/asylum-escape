@@ -6,53 +6,67 @@ class AsylumScene extends Phaser.Scene {
   create() {
     this.gameOver = false;
     this.hasKey = false;
+
     this.mapWidth = 1800;
     this.mapHeight = 1200;
-    this.lightRadius = 175;
+
+    this.nunState = "wander";
+    this.nunLastSeenAt = 0;
+    this.nunTarget = null;
+    this.nunNextWanderAt = 0;
+    this.nunWanderSpeed = 62;
+    this.nunChaseSpeed = 105;
+    this.nunDetectionRange = 300;
+
+    this.playerFacingAngle = 0;
+    this.lightRange = 430;
+    this.lightHalfAngle = 0.48;
+    this.lightRayCount = 140;
 
     this.physics.world.setBounds(0, 0, this.mapWidth, this.mapHeight);
 
-    // =========================
-    // CENÁRIO
-    // =========================
+    // CENARIO
     this.add.rectangle(900, 600, this.mapWidth, this.mapHeight, 0x292a25);
 
-    const tiles = this.add.graphics();
-    tiles.lineStyle(1, 0x414139, 0.45);
+    const floorGrid = this.add.graphics();
+    floorGrid.lineStyle(1, 0x414139, 0.35);
 
     for (let x = 0; x <= this.mapWidth; x += 64) {
-      tiles.lineBetween(x, 0, x, this.mapHeight);
+      floorGrid.lineBetween(x, 0, x, this.mapHeight);
     }
 
     for (let y = 0; y <= this.mapHeight; y += 64) {
-      tiles.lineBetween(0, y, this.mapWidth, y);
+      floorGrid.lineBetween(0, y, this.mapWidth, y);
     }
 
-    // =========================
     // PAREDES
-    // =========================
     this.walls = [];
 
     const addWall = (x, y, w, h) => {
       const wall = this.add.rectangle(x, y, w, h, 0x555149);
 
-      wall.setStrokeStyle(3, 0x292824);
+      wall.setStrokeStyle(4, 0x191916);
+      wall.setDepth(3);
+
       this.physics.add.existing(wall, true);
       this.walls.push(wall);
+
+      return wall;
     };
 
+    // PAREDES EXTERNAS
     addWall(900, 10, 1800, 20);
     addWall(900, 1190, 1800, 20);
     addWall(10, 600, 20, 1200);
     addWall(1790, 600, 20, 1200);
 
-    addWall(500, 180, 24, 300);
-    addWall(500, 700, 24, 380);
-    addWall(900, 180, 24, 300);
-    addWall(900, 700, 24, 380);
-    addWall(1300, 180, 24, 300);
-    addWall(1300, 700, 24, 380);
+    // PAREDES VERTICAIS
+    for (const x of [500, 900, 1300]) {
+      addWall(x, 330, 24, 300);
+      addWall(x, 890, 24, 380);
+    }
 
+    // PAREDES HORIZONTAIS
     addWall(250, 400, 400, 24);
     addWall(750, 400, 300, 24);
     addWall(1150, 400, 300, 24);
@@ -63,16 +77,17 @@ class AsylumScene extends Phaser.Scene {
 
     // JANELAS
     for (const x of [250, 700, 1100, 1550]) {
-      this.add.rectangle(x, 110, 90, 65, 0x08090b).setStrokeStyle(5, 0x777368);
+      this.add
+        .rectangle(x, 110, 90, 65, 0x08090b)
+        .setStrokeStyle(5, 0x777368)
+        .setDepth(2);
 
       for (let i = -1; i <= 1; i++) {
-        this.add.rectangle(x + i * 24, 110, 4, 58, 0x777368);
+        this.add.rectangle(x + i * 24, 110, 4, 58, 0x777368).setDepth(2);
       }
     }
 
-    // =========================
-    // CRIANÇA
-    // =========================
+    // JOGADOR
     this.player = this.add.container(110, 250);
 
     this.player.add([
@@ -89,9 +104,7 @@ class AsylumScene extends Phaser.Scene {
     this.player.body.setOffset(-11, -15);
     this.player.body.setCollideWorldBounds(true);
 
-    // =========================
     // FREIRA
-    // =========================
     this.nun = this.add.container(1550, 1000);
 
     this.nun.add([
@@ -110,19 +123,142 @@ class AsylumScene extends Phaser.Scene {
     this.nun.body.setCollideWorldBounds(true);
     this.nun.body.setMaxVelocity(130, 130);
 
-    // =========================
-    // COLISÕES
-    // =========================
+    // COLISOES DAS PAREDES
     for (const wall of this.walls) {
       this.physics.add.collider(this.player, wall);
       this.physics.add.collider(this.nun, wall);
     }
 
-    // =========================
-    // CHAVE
-    // =========================
-    this.keyItem = this.add.star(1450, 250, 5, 7, 15, 0xe4c56a);
+    // PORTAS
+    this.doors = [];
 
+    const addDoor = (x, y, w, h, locked = false) => {
+      const horizontal = w > h;
+
+      // Porta normal: madeira.
+      // Porta trancada: vermelho escuro.
+      const door = this.add.rectangle(x, y, w, h, locked ? 0x792e32 : 0x966033);
+
+      door.setStrokeStyle(4, locked ? 0xff5555 : 0xf0c778);
+
+      door.setDepth(5);
+
+      this.physics.add.existing(door, true);
+
+      door.isLocked = locked;
+      door.isOpen = false;
+      door.decorations = [];
+
+      const addDetail = (obj, depth = 6) => {
+        obj.setDepth(depth);
+        door.decorations.push(obj);
+        return obj;
+      };
+
+      // MOLDURA INTERNA
+      addDetail(
+        this.add
+          .rectangle(
+            x,
+            y,
+            Math.max(4, w - 12),
+            Math.max(4, h - 12),
+            0x000000,
+            0,
+          )
+          .setStrokeStyle(2, 0xd9ad6b),
+      );
+
+      // TABUAS DA MADEIRA
+      if (horizontal) {
+        for (const offset of [-5, 5]) {
+          addDetail(
+            this.add.rectangle(x, y + offset, Math.max(2, w - 16), 2, 0x402719),
+          );
+        }
+      } else {
+        for (const offset of [-5, 5]) {
+          addDetail(
+            this.add.rectangle(x + offset, y, 2, Math.max(2, h - 16), 0x402719),
+          );
+        }
+      }
+
+      // MACANETA
+      const handleX = horizontal ? x + w * 0.32 : x + 6;
+      const handleY = horizontal ? y + 5 : y + h * 0.25;
+
+      addDetail(this.add.circle(handleX, handleY, 4, 0xffdf80));
+
+      // CADEADO NAS PORTAS TRANCADAS
+      if (locked) {
+        const lock = this.add.text(x, y, "🔒", {
+          fontSize: horizontal ? "18px" : "22px",
+          backgroundColor: "#351719",
+          padding: { x: 3, y: 2 },
+        });
+
+        lock.setOrigin(0.5);
+        lock.setDepth(7);
+        door.decorations.push(lock);
+      }
+
+      // COLISOES DAS PORTAS
+      this.physics.add.collider(this.player, door);
+      this.physics.add.collider(this.nun, door);
+
+      this.doors.push(door);
+
+      return door;
+    };
+
+    // PORTAS VERTICAIS
+    addDoor(500, 590, 24, 220, false);
+    addDoor(900, 590, 24, 220, true);
+    addDoor(1300, 590, 24, 220, false);
+
+    // PORTAS HORIZONTAIS
+    addDoor(525, 400, 150, 24, true);
+    addDoor(950, 400, 100, 24, false);
+    addDoor(525, 850, 150, 24, false);
+    addDoor(950, 850, 100, 24, true);
+
+    // CHAVE EM LOCAL ALEATORIO
+    const keySpots = [
+      { x: 280, y: 260 },
+      { x: 350, y: 600 },
+      { x: 700, y: 260 },
+      { x: 700, y: 600 },
+      { x: 1100, y: 260 },
+      { x: 1150, y: 600 },
+      { x: 1500, y: 260 },
+      { x: 1500, y: 700 },
+      { x: 300, y: 1000 },
+      { x: 700, y: 1000 },
+      { x: 1100, y: 1000 },
+      { x: 1450, y: 1000 },
+    ];
+
+    const validKeySpots = keySpots.filter(
+      (spot) =>
+        Phaser.Math.Distance.Between(
+          spot.x,
+          spot.y,
+          this.player.x,
+          this.player.y,
+        ) > 260 &&
+        Phaser.Math.Distance.Between(spot.x, spot.y, this.nun.x, this.nun.y) >
+          180 &&
+        Phaser.Math.Distance.Between(spot.x, spot.y, 1690, 1080) > 180,
+    );
+
+    const keySpot = Phaser.Utils.Array.GetRandom(
+      validKeySpots.length ? validKeySpots : keySpots,
+    );
+
+    this.keyItem = this.add.star(keySpot.x, keySpot.y, 5, 7, 15, 0xe4c56a);
+
+    this.keyItem.setDepth(4);
     this.physics.add.existing(this.keyItem, true);
 
     this.physics.add.overlap(this.player, this.keyItem, () => {
@@ -134,12 +270,12 @@ class AsylumScene extends Phaser.Scene {
       this.status.setText("Você encontrou a chave! Encontre a saída.");
     });
 
-    // =========================
-    // SAÍDA
-    // =========================
+    // SAIDA
     this.exit = this.add.rectangle(1690, 1080, 70, 90, 0x522d2d);
 
     this.exit.setStrokeStyle(4, 0x98756b);
+    this.exit.setDepth(4);
+
     this.physics.add.existing(this.exit, true);
 
     this.physics.add.overlap(this.player, this.exit, () => {
@@ -152,29 +288,89 @@ class AsylumScene extends Phaser.Scene {
       }
     });
 
-    // A freira captura a criança.
+    // COLISAO COM A FREIRA
     this.physics.add.overlap(this.player, this.nun, () => this.finish(false));
 
-    // =========================
     // CONTROLES
-    // =========================
-    this.keys = this.input.keyboard.addKeys("W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT");
+    this.keys = this.input.keyboard.addKeys(
+      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E",
+    );
 
-    // =========================
-    // CÂMERA
-    // =========================
+    // DIRECAO DA LANTERNA PELO MOUSE
+    this.input.on("pointermove", (pointer) => {
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        worldPoint.x,
+        worldPoint.y,
+      );
+
+      if (distance > 8) {
+        this.playerFacingAngle = Phaser.Math.Angle.Between(
+          this.player.x,
+          this.player.y,
+          worldPoint.x,
+          worldPoint.y,
+        );
+      }
+    });
+
+    // TECLA E: ABRIR E FECHAR PORTAS
+    this.input.keyboard.on("keydown-E", () => {
+      if (this.gameOver) return;
+
+      const door = this.getNearbyDoor(90);
+
+      if (!door) {
+        this.status.setText("Chegue perto de uma porta para usar E.");
+        return;
+      }
+
+      // FECHAR PORTA
+      if (door.isOpen) {
+        door.isOpen = false;
+        door.setVisible(true);
+        door.body.enable = true;
+        door.body.updateFromGameObject();
+
+        for (const detail of door.decorations) {
+          detail.setVisible(true);
+        }
+
+        this.status.setText("Você fechou a porta.");
+        return;
+      }
+
+      // PORTA TRANCADA SEM CHAVE
+      if (door.isLocked && !this.hasKey) {
+        this.status.setText("Porta trancada! Você precisa da chave.");
+        return;
+      }
+
+      // ABRIR PORTA
+      door.isOpen = true;
+      door.body.enable = false;
+      door.setVisible(false);
+
+      for (const detail of door.decorations) {
+        detail.setVisible(false);
+      }
+
+      this.status.setText(
+        door.isLocked
+          ? "Você destrancou e abriu a porta."
+          : "Você abriu a porta.",
+      );
+    });
+
+    // CAMERA
     this.cameras.main.setBounds(0, 0, this.mapWidth, this.mapHeight);
 
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
 
-    // =========================
-    // ILUMINAÇÃO
-    // =========================
-    // Remove a textura antiga ao reiniciar a cena.
-    if (this.textures.exists("asylumDarkness")) {
-      this.textures.remove("asylumDarkness");
-    }
-
+    // TEXTURA DA ILUMINACAO
     this.darkTexture = this.textures.createCanvas(
       "asylumDarkness",
       this.scale.width,
@@ -188,12 +384,9 @@ class AsylumScene extends Phaser.Scene {
     this.darkness.setOrigin(0, 0).setScrollFactor(0).setDepth(90);
 
     this.glow = this.add.graphics();
-    this.glow.setScrollFactor(0);
-    this.glow.setDepth(89);
+    this.glow.setScrollFactor(0).setDepth(89);
 
-    // =========================
     // INTERFACE
-    // =========================
     this.add
       .text(20, 15, "♥", {
         fontSize: "32px",
@@ -221,12 +414,92 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(100);
 
+    this.doorHint = this.add
+      .text(480, 510, "", {
+        fontSize: "16px",
+        color: "#ffffff",
+        backgroundColor: "#111111dd",
+        padding: { x: 10, y: 6 },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(110);
+
     this.updateLighting();
   }
 
-  // =========================
-  // ILUMINAÇÃO DINÂMICA
-  // =========================
+  // ENCONTRAR A PORTA MAIS PROXIMA
+  getNearbyDoor(maxDistance = 90) {
+    let nearest = null;
+    let nearestDistance = maxDistance;
+
+    for (const door of this.doors) {
+      if (!door.active) continue;
+
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        door.x,
+        door.y,
+      );
+
+      if (distance <= nearestDistance) {
+        nearest = door;
+        nearestDistance = distance;
+      }
+    }
+
+    return nearest;
+  }
+
+  // VERIFICAR OBSTACULOS DA LANTERNA
+  isLightBlocked(x, y) {
+    const obstacles = [
+      ...this.walls,
+      ...this.doors.filter((door) => !door.isOpen),
+    ];
+
+    for (const obj of obstacles) {
+      if (!obj.active) continue;
+
+      const left = obj.x - obj.width / 2;
+      const right = obj.x + obj.width / 2;
+      const top = obj.y - obj.height / 2;
+      const bottom = obj.y + obj.height / 2;
+
+      if (x >= left && x <= right && y >= top && y <= bottom) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // CALCULAR ALCANCE DA LANTERNA
+  castLightRay(angle, maxDistance) {
+    const step = 4;
+
+    for (let distance = 0; distance <= maxDistance; distance += step) {
+      const x = this.player.x + Math.cos(angle) * distance;
+      const y = this.player.y + Math.sin(angle) * distance;
+
+      if (this.isLightBlocked(x, y)) {
+        const safeDistance = Math.max(0, distance - step);
+
+        return {
+          x: this.player.x + Math.cos(angle) * safeDistance,
+          y: this.player.y + Math.sin(angle) * safeDistance,
+        };
+      }
+    }
+
+    return {
+      x: this.player.x + Math.cos(angle) * maxDistance,
+      y: this.player.y + Math.sin(angle) * maxDistance,
+    };
+  }
+
+  // LANTERNA DIRECIONAL COM SOMBRAS
   updateLighting() {
     if (!this.darkContext || !this.player) return;
 
@@ -235,55 +508,78 @@ class AsylumScene extends Phaser.Scene {
     const height = this.scale.height;
     const camera = this.cameras.main;
 
-    const x = this.player.x - camera.scrollX;
-    const y = this.player.y - camera.scrollY;
+    const angle = this.playerFacingAngle;
+    const range = this.lightRange;
+    const halfAngle = this.lightHalfAngle;
 
-    // Escurece toda a tela.
+    const screenX = this.player.x - camera.scrollX;
+    const screenY = this.player.y - camera.scrollY;
+
     ctx.globalCompositeOperation = "source-over";
     ctx.clearRect(0, 0, width, height);
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.94)";
+    ctx.fillStyle = "rgba(0, 0, 0, 0.97)";
     ctx.fillRect(0, 0, width, height);
 
-    // Abre um foco de luz suave.
+    const points = [];
+
+    for (let i = 0; i <= this.lightRayCount; i++) {
+      const rayAngle =
+        angle - halfAngle + (i / this.lightRayCount) * halfAngle * 2;
+
+      const hit = this.castLightRay(rayAngle, range);
+
+      points.push({
+        x: hit.x - camera.scrollX,
+        y: hit.y - camera.scrollY,
+      });
+    }
+
+    ctx.save();
     ctx.globalCompositeOperation = "destination-out";
 
-    const gradient = ctx.createRadialGradient(x, y, 8, x, y, this.lightRadius);
+    ctx.beginPath();
+    ctx.moveTo(screenX, screenY);
+
+    for (const point of points) {
+      ctx.lineTo(point.x, point.y);
+    }
+
+    ctx.closePath();
+    ctx.clip();
+
+    const gradient = ctx.createRadialGradient(
+      screenX,
+      screenY,
+      8,
+      screenX,
+      screenY,
+      range,
+    );
 
     gradient.addColorStop(0, "rgba(0,0,0,1)");
-    gradient.addColorStop(0.35, "rgba(0,0,0,0.98)");
-    gradient.addColorStop(0.65, "rgba(0,0,0,0.78)");
-    gradient.addColorStop(0.85, "rgba(0,0,0,0.35)");
+    gradient.addColorStop(0.55, "rgba(0,0,0,1)");
+    gradient.addColorStop(0.8, "rgba(0,0,0,0.85)");
     gradient.addColorStop(1, "rgba(0,0,0,0)");
 
     ctx.fillStyle = gradient;
-
-    ctx.fillRect(
-      x - this.lightRadius,
-      y - this.lightRadius,
-      this.lightRadius * 2,
-      this.lightRadius * 2,
-    );
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
 
     ctx.globalCompositeOperation = "source-over";
 
     this.darkTexture.refresh();
 
-    // Brilho dourado discreto.
     this.glow.clear();
-    this.glow.fillStyle(0xffe4a8, 0.035);
-
-    this.glow.fillCircle(x, y, this.lightRadius * 0.65);
+    this.glow.fillStyle(0xffd98a, 0.1);
+    this.glow.fillCircle(screenX, screenY, 22);
   }
 
-  // =========================
-  // MOVIMENTAÇÃO E IA
-  // =========================
+  // ATUALIZACAO DO JOGO E IA DA FREIRA
   update() {
     if (this.gameOver) return;
 
     const k = this.keys;
-
     let dx = 0;
     let dy = 0;
 
@@ -297,35 +593,123 @@ class AsylumScene extends Phaser.Scene {
 
     this.player.body.setVelocity((dx / length) * speed, (dy / length) * speed);
 
-    // A freira persegue a criança.
-    const angle = Phaser.Math.Angle.Between(
+    if (dx !== 0 || dy !== 0) {
+      this.playerFacingAngle = Math.atan2(dy, dx);
+    }
+
+    // DICA DE INTERACAO COM A PORTA
+    const nearbyDoor = this.getNearbyDoor(90);
+
+    if (nearbyDoor) {
+      this.doorHint.setText(
+        nearbyDoor.isOpen
+          ? "E — FECHAR PORTA"
+          : nearbyDoor.isLocked && !this.hasKey
+            ? "PORTA TRANCADA — ENCONTRE A CHAVE"
+            : "E — ABRIR PORTA",
+      );
+    } else {
+      this.doorHint.setText("");
+    }
+
+    const now = this.time.now;
+
+    const distanceToPlayer = Phaser.Math.Distance.Between(
       this.nun.x,
       this.nun.y,
       this.player.x,
       this.player.y,
     );
 
-    this.nun.body.setVelocity(Math.cos(angle) * 105, Math.sin(angle) * 105);
+    // PERSEGUICAO
+    if (distanceToPlayer <= this.nunDetectionRange) {
+      this.nunState = "chase";
+      this.nunLastSeenAt = now;
+
+      this.nunTarget = {
+        x: this.player.x,
+        y: this.player.y,
+      };
+    } else if (this.nunState === "chase" && now - this.nunLastSeenAt > 5000) {
+      this.nunState = "wander";
+      this.nunTarget = null;
+      this.nunNextWanderAt = 0;
+    }
+
+    if (this.nunState === "chase" && this.nunTarget) {
+      const angle = Phaser.Math.Angle.Between(
+        this.nun.x,
+        this.nun.y,
+        this.nunTarget.x,
+        this.nunTarget.y,
+      );
+
+      this.nun.body.setVelocity(
+        Math.cos(angle) * this.nunChaseSpeed,
+        Math.sin(angle) * this.nunChaseSpeed,
+      );
+
+      if (
+        distanceToPlayer > this.nunDetectionRange &&
+        Phaser.Math.Distance.Between(
+          this.nun.x,
+          this.nun.y,
+          this.nunTarget.x,
+          this.nunTarget.y,
+        ) < 35
+      ) {
+        this.nunState = "wander";
+        this.nunTarget = null;
+        this.nunNextWanderAt = 0;
+      }
+    } else {
+      // PATRULHA ALEATORIA
+      if (
+        !this.nunTarget ||
+        now >= this.nunNextWanderAt ||
+        Phaser.Math.Distance.Between(
+          this.nun.x,
+          this.nun.y,
+          this.nunTarget.x,
+          this.nunTarget.y,
+        ) < 30
+      ) {
+        this.nunTarget = {
+          x: Phaser.Math.Between(100, this.mapWidth - 100),
+          y: Phaser.Math.Between(100, this.mapHeight - 100),
+        };
+
+        this.nunNextWanderAt = now + Phaser.Math.Between(1800, 4000);
+      }
+
+      const angle = Phaser.Math.Angle.Between(
+        this.nun.x,
+        this.nun.y,
+        this.nunTarget.x,
+        this.nunTarget.y,
+      );
+
+      this.nun.body.setVelocity(
+        Math.cos(angle) * this.nunWanderSpeed,
+        Math.sin(angle) * this.nunWanderSpeed,
+      );
+    }
 
     this.updateLighting();
   }
 
-  // =========================
-  // VITÓRIA, DERROTA E RECOMEÇO
-  // =========================
+  // FINAL DO JOGO
   finish(won) {
     if (this.gameOver) return;
 
     this.gameOver = true;
     this.physics.pause();
 
-    // Painel de fim de jogo.
-    const panel = this.add.rectangle(480, 280, 520, 230, 0x080808, 0.97);
+    this.add
+      .rectangle(480, 280, 520, 230, 0x080808, 0.97)
+      .setScrollFactor(0)
+      .setDepth(200);
 
-    panel.setScrollFactor(0);
-    panel.setDepth(200);
-
-    // Título.
     this.add
       .text(480, 225, won ? "VOCÊ ESCAPOU" : "FIM DE JOGO", {
         fontFamily: "Georgia",
@@ -336,7 +720,6 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(201);
 
-    // Mensagem.
     this.add
       .text(
         480,
@@ -351,7 +734,6 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(201);
 
-    // Botão RECOMEÇAR.
     const restartButton = this.add
       .text(480, 335, "⟳  RECOMEÇAR", {
         fontFamily: "Arial",
@@ -365,7 +747,6 @@ class AsylumScene extends Phaser.Scene {
       .setDepth(202)
       .setInteractive({ useHandCursor: true });
 
-    // Efeito ao passar o mouse.
     restartButton.on("pointerover", () => {
       restartButton.setStyle({
         backgroundColor: "#a33b3b",
@@ -378,7 +759,6 @@ class AsylumScene extends Phaser.Scene {
       });
     });
 
-    // Evita cliques repetidos e reinicia a cena.
     restartButton.on("pointerdown", () => {
       restartButton.disableInteractive();
       this.scene.restart();
@@ -386,9 +766,7 @@ class AsylumScene extends Phaser.Scene {
   }
 }
 
-// =========================
-// CONFIGURAÇÃO PHASER
-// =========================
+// CONFIGURACAO DO PHASER
 const config = {
   type: Phaser.AUTO,
   parent: "game",
