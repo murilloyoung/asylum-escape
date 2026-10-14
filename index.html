@@ -1,49 +1,23 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meu Site no GitHub Pages</title>
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-        body {
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            background-color: #0d1117;
-            color: #c9d1d9;
-        }
-        .container {
-            text-align: center;
-            padding: 2.5rem;
-            background-color: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 12px;
-            max-width: 450px;
-            width: 90%;
-        }
-        h1 {
-            color: #58a6ff;
-            margin-bottom: 0.75rem;
-            font-size: 1.8rem;
-        }
-        p {
-            color: #8b949e;
-            font-size: 1rem;
-            line-height: 1.5;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Site no Ar! 🚀</h1>
-        <p>Esta página inicial foi publicada usando o GitHub Pages.</p>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta property="og:image" content="assets/capa/capa.png" />
+
+    <title>Asylum Escape</title>
+
+    <link rel="stylesheet" href="style.css" />
+
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.min.js"></script>
+    <script src="main.js" defer></script>
+  </head>
+
+  <body>
+    <main id="game"></main>
+
+    <div id="help">
+      WASD / SETAS: mover · SHIFT: correr · Encontre a chave e escape!
     </div>
-</body>
+  </body>
 </html>
