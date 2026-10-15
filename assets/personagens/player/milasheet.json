@@ -1,0 +1,92 @@
+{
+  "name": "protagonist",
+  "frameWidth": 32,
+  "frameHeight": 32,
+  "pivot": {
+    "x": 16,
+    "y": 31,
+    "note": "Feet rest on row y=30; pivot is bottom-center."
+  },
+  "hitbox": {
+    "x": 12,
+    "y": 10,
+    "w": 10,
+    "h": 21
+  },
+  "facing": "right",
+  "note": "Left-facing frames are in the *_left.png files (horizontally mirrored).",
+  "columns": 7,
+  "animations": {
+    "idle": {
+      "row": 0,
+      "frames": 4,
+      "fps": 4,
+      "loop": true,
+      "files": {
+        "right": "protagonist_idle_right.png",
+        "left": "protagonist_idle_left.png"
+      }
+    },
+    "walk": {
+      "row": 1,
+      "frames": 6,
+      "fps": 8,
+      "loop": true,
+      "files": {
+        "right": "protagonist_walk_right.png",
+        "left": "protagonist_walk_left.png"
+      }
+    },
+    "run": {
+      "row": 2,
+      "frames": 6,
+      "fps": 12,
+      "loop": true,
+      "files": {
+        "right": "protagonist_run_right.png",
+        "left": "protagonist_run_left.png"
+      }
+    },
+    "hurt": {
+      "row": 3,
+      "frames": 3,
+      "fps": 10,
+      "loop": false,
+      "files": {
+        "right": "protagonist_hurt_right.png",
+        "left": "protagonist_hurt_left.png"
+      }
+    },
+    "fear": {
+      "row": 4,
+      "frames": 4,
+      "fps": 8,
+      "loop": true,
+      "files": {
+        "right": "protagonist_fear_right.png",
+        "left": "protagonist_fear_left.png"
+      }
+    },
+    "attack": {
+      "row": 5,
+      "frames": 5,
+      "fps": 12,
+      "loop": false,
+      "files": {
+        "right": "protagonist_attack_right.png",
+        "left": "protagonist_attack_left.png"
+      }
+    },
+    "death": {
+      "row": 6,
+      "frames": 7,
+      "fps": 8,
+      "loop": false,
+      "files": {
+        "right": "protagonist_death_right.png",
+        "left": "protagonist_death_left.png"
+      }
+    }
+  },
+  "image": "protagonist_sheet.png"
+}
