@@ -335,6 +335,7 @@ class AsylumScene extends Phaser.Scene {
       frameWidth: 32,
       frameHeight: 36,
     });
+    this.load.image("insideTiles", "assets/mapa/Inside_C.png");
     this.load.image("chave", "assets/mapa/itens/chave.png");
     this.load.image("chaveMestra", "assets/mapa/itens/chaveMestra.png");
   }
@@ -346,6 +347,19 @@ class AsylumScene extends Phaser.Scene {
 
     this.mapWidth = 1800;
     this.mapHeight = 1200;
+
+    // Recortes do tileset: piso, camas, armarios e caixas do asilo.
+    const insideTiles = this.textures.get("insideTiles");
+    if (!insideTiles.has("floor")) {
+      insideTiles.add("floor", 0, 144, 576, 96, 48);
+      insideTiles.add("bloodFloor", 0, 240, 576, 48, 48);
+      insideTiles.add("wall", 0, 0, 528, 96, 96);
+      insideTiles.add("bedA", 0, 60, 28, 72, 68);
+      insideTiles.add("bedB", 0, 156, 28, 72, 68);
+      insideTiles.add("locker", 0, 248, 28, 32, 72);
+      insideTiles.add("crateA", 0, 16, 212, 52, 68);
+      insideTiles.add("crateB", 0, 104, 216, 40, 64);
+    }
 
     // JOGADOR
     this.walkSpeed = 145;
@@ -387,18 +401,12 @@ class AsylumScene extends Phaser.Scene {
 
     this.physics.world.setBounds(0, 0, this.mapWidth, this.mapHeight);
 
-    // CENARIO
-    this.add.rectangle(900, 600, this.mapWidth, this.mapHeight, 0x292a25);
-
-    const floorGrid = this.add.graphics();
-    floorGrid.lineStyle(1, 0x414139, 0.35);
-
-    for (let x = 0; x <= this.mapWidth; x += 64) {
-      floorGrid.lineBetween(x, 0, x, this.mapHeight);
-    }
-
-    for (let y = 0; y <= this.mapHeight; y += 64) {
-      floorGrid.lineBetween(0, y, this.mapWidth, y);
+    // PISO MONTADO COM OS QUATRO AZULEJOS LIMPOS DO TILESET.
+    this.add
+      .tileSprite(900, 600, this.mapWidth, this.mapHeight, "insideTiles", "floor")
+      .setDepth(0);
+    for (const [x, y] of [[780, 690], [1390, 690], [280, 1040], [1540, 1030]]) {
+      this.add.image(x, y, "insideTiles", "bloodFloor").setDepth(1);
     }
 
     // PAREDES
@@ -406,9 +414,7 @@ class AsylumScene extends Phaser.Scene {
     this.wallRects = [];
 
     const addWall = (x, y, w, h) => {
-      const wall = this.add.rectangle(x, y, w, h, 0x555149);
-
-      wall.setStrokeStyle(4, 0x191916);
+      const wall = this.add.tileSprite(x, y, w, h, "insideTiles", "wall");
       wall.setDepth(3);
 
       this.physics.add.existing(wall, true);
@@ -500,6 +506,22 @@ class AsylumScene extends Phaser.Scene {
     this.nun.body.setOffset(-13, -19);
     this.nun.body.setCollideWorldBounds(true);
     this.nun.body.setMaxVelocity(220, 220);
+
+    // Moveis e caixas distribuidos pelas alas, usando recortes do tileset.
+    for (const [x, y, frame] of [
+      [180, 315, "bedA"],
+      [640, 315, "bedB"],
+      [1060, 315, "bedA"],
+      [1480, 315, "bedB"],
+      [370, 700, "locker"],
+      [820, 700, "locker"],
+      [1240, 700, "locker"],
+      [330, 1040, "crateA"],
+      [760, 1040, "crateB"],
+      [1160, 1040, "crateA"],
+    ]) {
+      this.add.image(x, y, "insideTiles", frame).setDepth(2);
+    }
 
     // COLISOES DAS PAREDES
     for (const wall of this.walls) {
