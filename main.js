@@ -311,6 +311,16 @@ class NavGrid {
 }
 // ==== NAV END ====
 
+// ==== VENT CONFIG ====
+// Cada par de ventilacoes se liga: entra numa, sai na outra.
+// (posicoes escolhidas para nao cair em cima de moveis, chaves ou paredes)
+const VENT_PAIRS = [
+  [{ x: 380, y: 230 }, { x: 130, y: 1090 }],
+  [{ x: 800, y: 230 }, { x: 1010, y: 1100 }],
+  [{ x: 1660, y: 230 }, { x: 600, y: 1105 }],
+];
+// ==== VENT CONFIG END ====
+
 class AsylumScene extends Phaser.Scene {
   constructor() {
     super("Asylum");
@@ -338,10 +348,16 @@ class AsylumScene extends Phaser.Scene {
     this.load.image("insideTiles", "assets/mapa/Inside_C.png");
     this.load.image("chave", "assets/mapa/itens/chave.png");
     this.load.image("chaveMestra", "assets/mapa/itens/chaveMestra.png");
+    this.load.audio("passos", "assets/audios/passos.mp3");
+    this.load.audio("corrida", "assets/audios/corrida.mp3");
+    this.load.audio("gritoFreira", "assets/audios/gritoFeira.mp3");
   }
 
   create() {
     this.gameOver = false;
+    this.footstepSound = this.sound.add("passos", { loop: true, volume: 0.3 });
+    this.runningSound = this.sound.add("corrida", { loop: true, volume: 0.35 });
+    this.screamSound = this.sound.add("gritoFreira", { volume: 0.65 });
     this.hasKey = false;
     this.hasMasterKey = false;
 
@@ -390,6 +406,15 @@ class AsylumScene extends Phaser.Scene {
     this.nunMoving = false;
     this.nunLastPos = { x: 1550, y: 1000 };
     this.nunStuckCheckAt = 0;
+    this.nunHunt = null; // quando ela viu voce entrar numa ventilacao
+
+    // VENTILACOES
+    this.ventState = "none"; // none | hidden | crawling
+    this.ventAt = null;
+    this.ventCooldownUntil = 0;
+    this.crawlDuration = 2000;
+    this.breath = 100; // "ar" para ficar escondido (acaba em ~8s)
+    this.crawlTween = null;
 
     // LANTERNA
     this.lightRange = 430;
@@ -408,6 +433,19 @@ class AsylumScene extends Phaser.Scene {
     for (const [x, y] of [[780, 690], [1390, 690], [280, 1040], [1540, 1030]]) {
       this.add.image(x, y, "insideTiles", "bloodFloor").setDepth(1);
     }
+
+    // VENTILACOES: sem fisica, o jogador passa por cima.
+    // Criadas antes do jogador e da freira (mesmo depth), entao ficam desenhadas abaixo deles.
+    this.createVentTexture();
+    this.vents = [];
+
+    VENT_PAIRS.forEach((pair, index) => {
+      pair.forEach((p, side) => {
+        const img = this.add.image(p.x, p.y, "ventilacao").setDepth(0);
+
+        this.vents.push({ pair: index, side, x: p.x, y: p.y, img });
+      });
+    });
 
     // PAREDES
     this.walls = [];
@@ -449,18 +487,6 @@ class AsylumScene extends Phaser.Scene {
     addWall(250, 850, 400, 24);
     addWall(750, 850, 300, 24);
     addWall(1150, 850, 300, 24);
-
-    // JANELAS
-    for (const x of [250, 700, 1100, 1550]) {
-      this.add
-        .rectangle(x, 110, 90, 65, 0x08090b)
-        .setStrokeStyle(5, 0x777368)
-        .setDepth(2);
-
-      for (let i = -1; i <= 1; i++) {
-        this.add.rectangle(x + i * 24, 110, 4, 58, 0x777368).setDepth(2);
-      }
-    }
 
     // ANIMACOES DA MILA: os arquivos sao folhas horizontais de quadros 32x32.
     for (const [key, texture, frames, rate] of [
@@ -739,7 +765,7 @@ class AsylumScene extends Phaser.Scene {
 
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
-      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E",
+      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,SPACE",
     );
 
     this.normalKeyIndicator = this.add
@@ -761,7 +787,10 @@ class AsylumScene extends Phaser.Scene {
     });
 
     // TECLA E: ABRIR E FECHAR PORTAS
-    this.input.keyboard.on("keydown-E", () => this.interactWithDoor());
+    this.input.keyboard.on("keydown-E", () => this.onInteract());
+
+    // ESPACO: RASTEJAR ATE A OUTRA VENTILACAO (quando escondido)
+    this.input.keyboard.on("keydown-SPACE", () => this.onCrawlKey());
 
     // CAMERA
     this.cameras.main.setBounds(0, 0, this.mapWidth, this.mapHeight);
@@ -794,6 +823,7 @@ class AsylumScene extends Phaser.Scene {
       .setDepth(100);
 
     this.staminaBar = this.add.graphics().setScrollFactor(0).setDepth(100);
+    this.breathBar = this.add.graphics().setScrollFactor(0).setDepth(100);
 
     this.status = this.add
       .text(20, 60, "", {
@@ -818,6 +848,7 @@ class AsylumScene extends Phaser.Scene {
     this.doorHint = this.add
       .text(480, 510, "", {
         fontSize: "16px",
+        align: "center",
         color: "#ffffff",
         backgroundColor: "#111111dd",
         padding: { x: 10, y: 6 },
@@ -962,6 +993,254 @@ class AsylumScene extends Phaser.Scene {
     this.say(
       wasLocked ? "Você destrancou e abriu a porta." : "Você abriu a porta.",
     );
+  }
+
+  // ---------------------------------------------------------------
+  // VENTILACOES (atalho entre salas + esconderijo)
+  // ---------------------------------------------------------------
+
+  createVentTexture() {
+    if (this.textures.exists("ventilacao")) return;
+
+    const w = 56;
+    const h = 40;
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+
+    g.fillStyle(0x23221f, 1);
+    g.fillRect(0, 0, w, h);
+    g.fillStyle(0x77736a, 1);
+    g.fillRect(2, 2, w - 4, h - 4);
+    g.fillStyle(0x07070a, 1);
+    g.fillRect(5, 5, w - 10, h - 10);
+    g.fillStyle(0x8c887d, 1);
+
+    for (let i = 0; i < 4; i++) {
+      g.fillRect(10 + i * 12, 5, 4, h - 10);
+    }
+
+    g.fillStyle(0x3a3833, 1);
+    g.fillRect(5, h - 8, w - 10, 3);
+
+    g.generateTexture("ventilacao", w, h);
+    g.destroy();
+  }
+
+  ventPartner(vent) {
+    return this.vents.find((v) => v.pair === vent.pair && v.side !== vent.side);
+  }
+
+  getNearbyVent(maxDistance = 46) {
+    let nearest = null;
+    let nearestDistance = maxDistance;
+
+    for (const vent of this.vents) {
+      const d = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        vent.x,
+        vent.y,
+      );
+
+      if (d <= nearestDistance) {
+        nearest = vent;
+        nearestDistance = d;
+      }
+    }
+
+    return nearest;
+  }
+
+  // tecla E: sair da ventilacao, entrar numa ou usar uma porta
+  onInteract() {
+    if (this.gameOver) return;
+
+    if (this.ventState === "hidden") {
+      this.exitVent(false);
+      return;
+    }
+
+    if (this.ventState === "crawling") return;
+
+    const vent = this.getNearbyVent(46);
+
+    if (vent) {
+      this.enterVent(vent);
+      return;
+    }
+
+    this.interactWithDoor();
+  }
+
+  // tecla ESPACO: rastejar ate a outra ponta
+  onCrawlKey() {
+    if (this.gameOver || this.ventState !== "hidden") return;
+
+    this.crawlVent();
+  }
+
+  // barulho: se a freira estiver perto e distraida, ela vai investigar
+  makeNoise(x, y, radius) {
+    const d = Phaser.Math.Distance.Between(this.nun.x, this.nun.y, x, y);
+
+    if (
+      d <= radius &&
+      ["patrol", "search", "investigate"].includes(this.nunState)
+    ) {
+      this.setNunState("investigate");
+      this.setNunDestination(x, y);
+      return true;
+    }
+
+    return false;
+  }
+
+  enterVent(vent) {
+    const now = this.time.now;
+
+    if (now < this.ventCooldownUntil) return;
+
+    if (this.breath < 25) {
+      this.say("Você está sem fôlego para entrar agora.");
+      return;
+    }
+
+    // ela te viu entrar? (confere antes de sumir)
+    const saw =
+      this.nunCanSee(430) ||
+      (this.nunState === "chase" && now - this.nunLastSeenAt < 1400);
+
+    this.ventState = "hidden";
+    this.ventAt = vent;
+    this.playerRunning = false;
+
+    this.player.setPosition(vent.x, vent.y);
+    this.player.body.setVelocity(0, 0);
+    this.player.body.enable = false;
+    this.player.setVisible(false);
+
+    if (saw) {
+      this.nunHunt = {
+        stage: "toEntry",
+        entry: vent,
+        target: { x: vent.x, y: vent.y },
+        expireAt: now + 40000,
+      };
+
+      this.setNunState("ventHunt");
+      this.nunRepathAt = 0;
+      this.say("A freira viu você entrar na ventilação!", 3500);
+      this.cameras.main.shake(180, 0.005);
+    } else if (this.makeNoise(vent.x, vent.y, 320)) {
+      this.say("A ventilação rangeu... a freira ouviu!", 3000);
+    } else {
+      this.say("Você entrou na ventilação.", 2500);
+    }
+  }
+
+  crawlVent() {
+    const from = this.ventAt;
+    const to = this.ventPartner(from);
+
+    this.ventState = "crawling";
+    this.say("Você rasteja pelo duto...", this.crawlDuration);
+
+    this.crawlTween = this.tweens.add({
+      targets: this.player,
+      x: to.x,
+      y: to.y,
+      duration: this.crawlDuration,
+      ease: "Sine.easeInOut",
+      onComplete: () => {
+        if (this.gameOver) return;
+
+        this.crawlTween = null;
+        this.ventState = "hidden";
+        this.ventAt = to;
+        this.say("Você chegou na outra ventilação.", 2500);
+      },
+    });
+  }
+
+  exitVent(force) {
+    const v = this.ventAt;
+
+    if (!v) return;
+
+    // nao sai com a freira em cima da ventilacao
+    if (
+      !force &&
+      Phaser.Math.Distance.Between(this.nun.x, this.nun.y, v.x, v.y) < 70
+    ) {
+      this.say("A freira está bem ali! Espere ela se afastar.");
+      return;
+    }
+
+    this.ventState = "none";
+    this.ventAt = null;
+
+    this.player.setPosition(v.x, v.y);
+    this.player.setVisible(true);
+    this.player.body.enable = true;
+    this.player.body.updateFromGameObject();
+    this.player.body.setVelocity(0, 0);
+
+    this.ventCooldownUntil = this.time.now + 900;
+
+    if (force) {
+      this.say("Sem ar! Você saiu tossindo.");
+      this.makeNoise(v.x, v.y, 360);
+    }
+  }
+
+  // o ar acaba escondido; fora da ventilacao ele volta
+  updateVent(time, dt) {
+    if (this.ventState === "hidden") {
+      this.breath = Math.max(0, this.breath - 12.5 * dt);
+
+      if (this.breath <= 0) this.exitVent(true);
+    } else if (this.ventState === "none") {
+      this.breath = Math.min(100, this.breath + 15 * dt);
+    }
+  }
+
+  updateHint() {
+    let text = "";
+
+    if (this.ventState === "hidden") {
+      text = "ESPAÇO — RASTEJAR ATÉ A OUTRA VENTILAÇÃO\nE — SAIR DAQUI";
+    } else if (this.ventState === "crawling") {
+      text = "RASTEJANDO...";
+    } else {
+      const vent = this.getNearbyVent(46);
+      const door = this.getNearbyDoor(55);
+
+      if (vent) {
+        text = "E — ENTRAR NA VENTILAÇÃO";
+      } else if (door) {
+        text = door.isOpen
+          ? "E — FECHAR PORTA"
+          : door.isLocked && !this.hasKey
+            ? "PORTA TRANCADA - ENCONTRE A CHAVE COMUM"
+            : "E — ABRIR PORTA";
+      }
+    }
+
+    this.doorHint.setText(text);
+  }
+
+  drawBreath() {
+    const g = this.breathBar;
+
+    g.clear();
+
+    if (this.breath >= 100 && this.ventState === "none") return;
+
+    g.fillStyle(0x000000, 0.55);
+    g.fillRect(62, 50, 150, 6);
+    g.fillStyle(this.breath < 25 ? 0xaa3333 : 0x7fa9b3, 0.9);
+    g.fillRect(62, 50, (150 * this.breath) / 100, 6);
+    g.lineStyle(1, 0x777368, 0.8);
+    g.strokeRect(62, 50, 150, 6);
   }
 
   // ---------------------------------------------------------------
@@ -1135,38 +1414,56 @@ class AsylumScene extends Phaser.Scene {
     ctx.fillStyle = "rgba(0, 0, 0, 0.97)";
     ctx.fillRect(0, 0, width, height);
 
-    // CONE LARGO E SUAVE (penumbra), CONE CENTRAL FORTE E LUZ AMBIENTE
-    const soft = this.buildVisibility(
-      angle,
-      half * 1.35,
-      range * 0.92,
-      60,
-      camera,
-    );
-    const core = this.buildVisibility(
-      angle,
-      half,
-      range,
-      this.lightRayCount,
-      camera,
-    );
+    // DENTRO DA VENTILACAO: lanterna apagada, so um fiapo de luz ao redor
+    const inVent = this.ventState !== "none";
+    const ambientRange = inVent ? 70 : this.ambientRange;
+
     const ambient = this.buildVisibility(
       0,
       Math.PI,
-      this.ambientRange * flicker,
+      ambientRange * flicker,
       56,
       camera,
     );
 
     ctx.globalCompositeOperation = "destination-out";
 
-    this.carveLight(sx, sy, soft, range * 0.92, 8, 0.5);
-    this.carveLight(sx, sy, core, range, 8, 1);
-    this.carveLight(sx, sy, ambient, this.ambientRange * flicker, 6, 0.8);
+    let core = null;
+
+    if (!inVent) {
+      // CONE LARGO E SUAVE (penumbra) E CONE CENTRAL FORTE
+      const soft = this.buildVisibility(
+        angle,
+        half * 1.35,
+        range * 0.92,
+        60,
+        camera,
+      );
+
+      core = this.buildVisibility(
+        angle,
+        half,
+        range,
+        this.lightRayCount,
+        camera,
+      );
+
+      this.carveLight(sx, sy, soft, range * 0.92, 8, 0.5);
+      this.carveLight(sx, sy, core, range, 8, 1);
+    }
+
+    this.carveLight(
+      sx,
+      sy,
+      ambient,
+      ambientRange * flicker,
+      6,
+      inVent ? 0.55 : 0.8,
+    );
 
     // TOM QUENTE DA LANTERNA
     ctx.globalCompositeOperation = "source-over";
-    this.tintLight(sx, sy, core, range);
+    if (core) this.tintLight(sx, sy, core, range);
 
     this.darkTexture.refresh();
   }
@@ -1181,7 +1478,9 @@ class AsylumScene extends Phaser.Scene {
     this.nunState = state;
 
     // destaca a freira em vermelho enquanto ela persegue a personagem
-    this.nunSprite.setTint(state === "chase" ? 0xffb0b0 : 0xffffff);
+    this.nunSprite.setTint(
+      state === "chase" || state === "ventHunt" ? 0xffb0b0 : 0xffffff,
+    );
   }
 
   // calcula o caminho ate o destino
@@ -1264,6 +1563,9 @@ class AsylumScene extends Phaser.Scene {
 
   // a freira enxerga: alcance, cone de visao (ou muito perto) e linha de visao livre
   nunCanSee(visionRange) {
+    // escondido ou rastejando na ventilacao: ninguem te ve
+    if (this.ventState !== "none") return false;
+
     const nx = this.nun.x;
     const ny = this.nun.y;
     const px = this.player.x;
@@ -1350,6 +1652,7 @@ class AsylumScene extends Phaser.Scene {
 
   onNunSpotted() {
     this.say("A FREIRA TE VIU!", 2500);
+    this.screamSound.play();
     this.cameras.main.shake(220, 0.006);
   }
 
@@ -1373,11 +1676,13 @@ class AsylumScene extends Phaser.Scene {
     // PERCEPCAO
     const visionRange = this.playerRunning ? 430 : 330;
     const seesPlayer = this.nunCanSee(visionRange);
-    const heardPlayer = this.playerRunning && dist <= 380;
+    const heardPlayer =
+      this.playerRunning && this.ventState === "none" && dist <= 380;
 
     if (seesPlayer) {
       if (this.nunState !== "chase") this.onNunSpotted();
 
+      this.nunHunt = null;
       this.setNunState("chase");
       this.nunLastSeen = { x: px, y: py };
       this.nunLastSeenAt = now;
@@ -1406,6 +1711,64 @@ class AsylumScene extends Phaser.Scene {
         const direct = seesPlayer && dist < 110;
 
         this.moveNun(this.nunChaseSpeed, direct ? target : null);
+        break;
+      }
+
+      case "ventHunt": {
+        // ela viu voce entrar: vai ate a ventilacao e, se nao te achar, confere a outra ponta
+        const h = this.nunHunt;
+
+        if (!h || now > h.expireAt) {
+          this.nunHunt = null;
+          this.setNunState("patrol");
+          this.nunDest = null;
+          break;
+        }
+
+        if (now >= this.nunRepathAt) {
+          this.setNunDestination(h.target.x, h.target.y);
+          this.nunRepathAt = now + 400;
+        }
+
+        this.moveNun(this.nunChaseSpeed);
+
+        const dTarget = Phaser.Math.Distance.Between(
+          nun.x,
+          nun.y,
+          h.target.x,
+          h.target.y,
+        );
+
+        if (dTarget < 36 || (dTarget < 80 && this.nunArrived())) {
+          if (h.stage === "toEntry") {
+            const inside =
+              this.ventState === "hidden" &&
+              this.ventAt &&
+              this.ventAt.pair === h.entry.pair &&
+              this.ventAt.side === h.entry.side;
+
+            if (inside) {
+              this.finish(false, "A freira puxou você para fora da ventilação!");
+              break;
+            }
+
+            // voce ja rastejou: ela vai esperar na outra ponta
+            const other = this.ventPartner(h.entry);
+
+            h.stage = "toExit";
+            h.target = { x: other.x, y: other.y };
+            this.setNunDestination(other.x, other.y);
+            this.nunRepathAt = now + 400;
+          } else {
+            // chegou na saida: fica ali parada, de olho
+            this.nunHunt = null;
+            this.setNunState("search");
+            this.nunWaitUntil = now + 4500;
+            this.nunSearchUntil = now + 8000;
+            this.nunDest = null;
+            this.stopNun();
+          }
+        }
         break;
       }
 
@@ -1531,6 +1894,12 @@ class AsylumScene extends Phaser.Scene {
     if (k.W.isDown || k.UP.isDown) dy--;
     if (k.S.isDown || k.DOWN.isDown) dy++;
 
+    // dentro da ventilacao o jogador nao anda
+    if (this.ventState !== "none") {
+      dx = 0;
+      dy = 0;
+    }
+
     const moving = dx !== 0 || dy !== 0;
     const length = Math.hypot(dx, dy) || 1;
 
@@ -1548,6 +1917,16 @@ class AsylumScene extends Phaser.Scene {
     }
 
     this.playerRunning = running;
+
+    const movementSound = running ? this.runningSound : this.footstepSound;
+    const otherMovementSound = running ? this.footstepSound : this.runningSound;
+    if (moving) {
+      if (otherMovementSound.isPlaying) otherMovementSound.stop();
+      if (!movementSound.isPlaying) movementSound.play();
+    } else {
+      this.footstepSound.stop();
+      this.runningSound.stop();
+    }
 
     const facingLeft = dx !== 0 ? dx < 0 : Math.cos(this.playerFacingAngle) < 0;
     const direction = facingLeft ? "left" : "right";
@@ -1591,20 +1970,9 @@ class AsylumScene extends Phaser.Scene {
       this.playerFacingAngle += Phaser.Math.Clamp(diff, -step, step);
     }
 
-    // DICA DE INTERACAO COM A PORTA
-    const nearbyDoor = this.getNearbyDoor(55);
-
-    if (nearbyDoor) {
-      this.doorHint.setText(
-        nearbyDoor.isOpen
-          ? "E — FECHAR PORTA"
-          : nearbyDoor.isLocked && !this.hasKey
-            ? "PORTA TRANCADA - ENCONTRE A CHAVE COMUM"
-            : "E — ABRIR PORTA",
-      );
-    } else {
-      this.doorHint.setText("");
-    }
+    // VENTILACOES (ar) E DICA DE INTERACAO
+    this.updateVent(time, dt);
+    this.updateHint();
 
     // FREIRA
     this.updateNun(time, delta);
@@ -1624,6 +1992,7 @@ class AsylumScene extends Phaser.Scene {
 
     this.updateLighting(time, fear);
     this.drawStamina();
+    this.drawBreath();
 
     if (this.statusUntil && time > this.statusUntil) {
       this.status.setVisible(false);
@@ -1632,10 +2001,15 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // FINAL DO JOGO
-  finish(won) {
+  finish(won, message) {
     if (this.gameOver) return;
 
     this.gameOver = true;
+
+    if (this.crawlTween) this.crawlTween.stop();
+    this.player.setVisible(true);
+    this.footstepSound.stop();
+    this.runningSound.stop();
     this.nun.body.setVelocity(0, 0);
     this.player.body.setVelocity(0, 0);
     this.physics.pause();
@@ -1659,7 +2033,8 @@ class AsylumScene extends Phaser.Scene {
       .text(
         480,
         275,
-        won ? "Você conseguiu fugir do asilo!" : "A freira capturou você...",
+        message ||
+          (won ? "Você conseguiu fugir do asilo!" : "A freira capturou você..."),
         {
           fontSize: "15px",
           color: "#eeeeee",
