@@ -315,9 +315,22 @@ class NavGrid {
 // Cada par de ventilacoes se liga: entra numa, sai na outra.
 // (posicoes escolhidas para nao cair em cima de moveis, chaves ou paredes)
 const VENT_PAIRS = [
-  [{ x: 380, y: 230 }, { x: 130, y: 1090 }],
-  [{ x: 800, y: 230 }, { x: 1010, y: 1100 }],
-  [{ x: 1660, y: 230 }, { x: 600, y: 1105 }],
+  [
+    { x: 380, y: 230 },
+    { x: 130, y: 1090 },
+  ],
+  [
+    { x: 800, y: 230 },
+    { x: 1010, y: 1100 },
+  ],
+  [
+    { x: 1660, y: 230 },
+    { x: 600, y: 1105 },
+  ],
+  [
+    { x: 2200, y: 230 },
+    { x: 2100, y: 1400 },
+  ],
 ];
 // ==== VENT CONFIG END ====
 
@@ -351,18 +364,26 @@ class AsylumScene extends Phaser.Scene {
     this.load.audio("passos", "assets/audios/passos.mp3");
     this.load.audio("corrida", "assets/audios/corrida.mp3");
     this.load.audio("gritoFreira", "assets/audios/gritoFeira.mp3");
+    this.load.audio("ambiente", "assets/audios/ambiente.mp3");
+    this.load.audio("chase", "assets/audios/chase.mp3");
   }
 
   create() {
     this.gameOver = false;
+    this.gameStarted = false;
     this.footstepSound = this.sound.add("passos", { loop: true, volume: 0.3 });
     this.runningSound = this.sound.add("corrida", { loop: true, volume: 0.35 });
     this.screamSound = this.sound.add("gritoFreira", { volume: 0.65 });
+    this.ambientMusic = this.sound.add("ambiente", { loop: true, volume: 0.3 });
+    this.chaseMusic = this.sound.add("chase", { loop: true, volume: 0.4 });
     this.hasKey = false;
     this.hasMasterKey = false;
 
-    this.mapWidth = 1800;
-    this.mapHeight = 1200;
+    this.mapWidth = 2400;
+    this.mapHeight = 1600;
+    this.worldDepth = (y) =>
+      1 + (50 * Phaser.Math.Clamp(y, 0, this.mapHeight)) / this.mapHeight;
+    this.characterDepth = 80;
 
     // Recortes do tileset: piso, camas, armarios e caixas do asilo.
     const insideTiles = this.textures.get("insideTiles");
@@ -417,7 +438,7 @@ class AsylumScene extends Phaser.Scene {
     this.crawlTween = null;
 
     // LANTERNA
-    this.lightRange = 430;
+    this.lightRange = 200;
     this.lightHalfAngle = 0.48;
     this.lightRayCount = 90;
     this.ambientRange = 100;
@@ -428,9 +449,21 @@ class AsylumScene extends Phaser.Scene {
 
     // PISO MONTADO COM OS QUATRO AZULEJOS LIMPOS DO TILESET.
     this.add
-      .tileSprite(900, 600, this.mapWidth, this.mapHeight, "insideTiles", "floor")
+      .tileSprite(
+        this.mapWidth / 2,
+        this.mapHeight / 2,
+        this.mapWidth,
+        this.mapHeight,
+        "insideTiles",
+        "floor",
+      )
       .setDepth(0);
-    for (const [x, y] of [[780, 690], [1390, 690], [280, 1040], [1540, 1030]]) {
+    for (const [x, y] of [
+      [780, 690],
+      [1390, 690],
+      [280, 1040],
+      [1540, 1030],
+    ]) {
       this.add.image(x, y, "insideTiles", "bloodFloor").setDepth(1);
     }
 
@@ -441,7 +474,9 @@ class AsylumScene extends Phaser.Scene {
 
     VENT_PAIRS.forEach((pair, index) => {
       pair.forEach((p, side) => {
-        const img = this.add.image(p.x, p.y, "ventilacao").setDepth(0);
+        const img = this.add
+          .image(p.x, p.y, "ventilacao")
+          .setDepth(this.worldDepth(p.y));
 
         this.vents.push({ pair: index, side, x: p.x, y: p.y, img });
       });
@@ -453,7 +488,7 @@ class AsylumScene extends Phaser.Scene {
 
     const addWall = (x, y, w, h) => {
       const wall = this.add.tileSprite(x, y, w, h, "insideTiles", "wall");
-      wall.setDepth(3);
+      wall.setDepth(this.worldDepth(y + h / 2));
 
       this.physics.add.existing(wall, true);
       this.walls.push(wall);
@@ -468,16 +503,20 @@ class AsylumScene extends Phaser.Scene {
     };
 
     // PAREDES EXTERNAS
-    addWall(900, 10, 1800, 20);
-    addWall(900, 1190, 1800, 20);
-    addWall(10, 600, 20, 1200);
-    addWall(1790, 600, 20, 1200);
+    addWall(this.mapWidth / 2, 10, this.mapWidth, 20);
+    addWall(this.mapWidth / 2, this.mapHeight - 10, this.mapWidth, 20);
+    addWall(10, this.mapHeight / 2, 20, this.mapHeight);
+    addWall(this.mapWidth - 10, this.mapHeight / 2, 20, this.mapHeight);
 
     // PAREDES VERTICAIS
     for (const x of [500, 900, 1300]) {
       addWall(x, 330, 24, 300);
       addWall(x, 890, 24, 380);
     }
+
+    // Ala leste conectada ao restante do asilo pelo corredor central.
+    addWall(1900, 330, 24, 300);
+    addWall(1900, 890, 24, 380);
 
     // PAREDES HORIZONTAIS
     addWall(250, 400, 400, 24);
@@ -511,6 +550,7 @@ class AsylumScene extends Phaser.Scene {
 
     // JOGADOR
     this.player = this.add.container(110, 250);
+    this.player.setDepth(this.characterDepth);
     this.playerSprite = this.add
       .sprite(0, 0, "milaIdleRight")
       .setOrigin(0.5, 0.5)
@@ -524,6 +564,7 @@ class AsylumScene extends Phaser.Scene {
 
     // VILA (FREIRA): sprite sheet com quadros 32x36.
     this.nun = this.add.container(1550, 1000);
+    this.nun.setDepth(this.characterDepth);
     this.nunSprite = this.add.sprite(0, 0, "freira", 0).setScale(1.5);
     this.nun.add(this.nunSprite);
 
@@ -545,8 +586,13 @@ class AsylumScene extends Phaser.Scene {
       [330, 1040, "crateA"],
       [760, 1040, "crateB"],
       [1160, 1040, "crateA"],
+      [2080, 315, "bedA"],
+      [2230, 720, "locker"],
+      [1840, 1370, "crateB"],
+      [2160, 1370, "crateA"],
     ]) {
-      this.add.image(x, y, "insideTiles", frame).setDepth(2);
+      const furniture = this.add.image(x, y, "insideTiles", frame);
+      furniture.setDepth(this.worldDepth(y + furniture.displayHeight / 2));
     }
 
     // COLISOES DAS PAREDES
@@ -565,7 +611,7 @@ class AsylumScene extends Phaser.Scene {
       const door = this.add.rectangle(x, y, w, h, locked ? 0x792e32 : 0x966033);
 
       door.setStrokeStyle(4, locked ? 0xff5555 : 0xf0c778);
-      door.setDepth(5);
+      door.setDepth(this.worldDepth(y + h / 2));
 
       this.physics.add.existing(door, true);
 
@@ -580,7 +626,7 @@ class AsylumScene extends Phaser.Scene {
         bottom: y + h / 2,
       };
 
-      const addDetail = (obj, depth = 6) => {
+      const addDetail = (obj, depth = door.depth + 0.01) => {
         obj.setDepth(depth);
         door.decorations.push(obj);
         return obj;
@@ -630,7 +676,7 @@ class AsylumScene extends Phaser.Scene {
         });
 
         lock.setOrigin(0.5);
-        lock.setDepth(7);
+        lock.setDepth(door.depth + 0.02);
         door.decorations.push(lock);
         door.lockIcon = lock;
       }
@@ -648,6 +694,7 @@ class AsylumScene extends Phaser.Scene {
     addDoor(500, 590, 24, 220, false);
     addDoor(900, 590, 24, 220, true);
     addDoor(1300, 590, 24, 220, false);
+    addDoor(1900, 590, 24, 220, false);
 
     // PORTAS HORIZONTAIS
     addDoor(525, 400, 150, 24, true);
@@ -684,6 +731,10 @@ class AsylumScene extends Phaser.Scene {
       { x: 700, y: 1000 },
       { x: 1100, y: 1000 },
       { x: 1450, y: 1000 },
+      { x: 2080, y: 260 },
+      { x: 2220, y: 980 },
+      { x: 1840, y: 1420 },
+      { x: 2200, y: 1420 },
     ];
 
     const reachable = this.nav.reachable(this.player.x, this.player.y);
@@ -703,20 +754,32 @@ class AsylumScene extends Phaser.Scene {
         ) > 260 &&
         Phaser.Math.Distance.Between(spot.x, spot.y, this.nun.x, this.nun.y) >
           180 &&
-        Phaser.Math.Distance.Between(spot.x, spot.y, 1690, 1080) > 180,
+        Phaser.Math.Distance.Between(spot.x, spot.y, 2290, 1470) > 180,
     );
 
     const availableKeySpots = (
-      validKeySpots.length ? validKeySpots : reachableSpots.length ? reachableSpots : keySpots
+      validKeySpots.length
+        ? validKeySpots
+        : reachableSpots.length
+          ? reachableSpots
+          : keySpots
     ).slice();
-    const normalKeySpot = Phaser.Utils.Array.RemoveRandomElement(availableKeySpots);
+    const normalKeySpot =
+      Phaser.Utils.Array.RemoveRandomElement(availableKeySpots);
     const masterKeySpot = Phaser.Utils.Array.GetRandom(availableKeySpots);
 
     const addCollectibleKey = (spot, texture, onCollect) => {
       const item = this.add.image(spot.x, spot.y, texture);
-      item.setDisplaySize(20, 42).setDepth(4);
+      item
+        .setDisplaySize(20, 42)
+        .setDepth(this.worldDepth(spot.y + item.displayHeight / 2));
       this.physics.add.existing(item, true);
-      this.tweens.add({ targets: item, angle: 360, duration: 4000, repeat: -1 });
+      this.tweens.add({
+        targets: item,
+        angle: 360,
+        duration: 4000,
+        repeat: -1,
+      });
       this.physics.add.overlap(this.player, item, () => {
         if (this.gameOver || item.collected) return;
         item.collected = true;
@@ -730,7 +793,10 @@ class AsylumScene extends Phaser.Scene {
       this.hasKey = true;
       this.normalKeyIndicator.setVisible(true);
       this.nunChaseSpeed = this.nunChaseSpeedWithKey;
-      this.say("Voce encontrou a chave das portas! A freira ouviu o barulho...", 5000);
+      this.say(
+        "Voce encontrou a chave das portas! A freira ouviu o barulho...",
+        5000,
+      );
       if (this.nunState === "patrol") {
         this.setNunState("investigate");
         this.setNunDestination(this.player.x, this.player.y);
@@ -743,10 +809,10 @@ class AsylumScene extends Phaser.Scene {
       this.say("Voce encontrou a chave mestra. Agora alcance a saida!", 5000);
     });
     // SAIDA
-    this.exit = this.add.rectangle(1690, 1080, 70, 90, 0x522d2d);
+    this.exit = this.add.rectangle(2290, 1470, 70, 90, 0x522d2d);
 
     this.exit.setStrokeStyle(4, 0x98756b);
-    this.exit.setDepth(4);
+    this.exit.setDepth(this.worldDepth(1470 + 45));
 
     this.physics.add.existing(this.exit, true);
 
@@ -768,14 +834,39 @@ class AsylumScene extends Phaser.Scene {
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,SPACE",
     );
 
+    // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
+    this.hotbar = this.add.graphics().setScrollFactor(0).setDepth(99);
+    const hotbarSlotSize = 44;
+    const hotbarGap = 4;
+    const hotbarWidth = hotbarSlotSize * 9 + hotbarGap * 8;
+    const hotbarX = (this.scale.width - hotbarWidth) / 2;
+    const hotbarY = this.scale.height - hotbarSlotSize - 14;
+
+    for (let slot = 0; slot < 9; slot++) {
+      const x = hotbarX + slot * (hotbarSlotSize + hotbarGap);
+      this.hotbar.fillStyle(0x171716, 0.82);
+      this.hotbar.fillRect(x, hotbarY, hotbarSlotSize, hotbarSlotSize);
+      this.hotbar.lineStyle(
+        slot === 0 ? 2 : 1,
+        slot === 0 ? 0xf0d58a : 0x77736b,
+        0.95,
+      );
+      this.hotbar.strokeRect(x, hotbarY, hotbarSlotSize, hotbarSlotSize);
+    }
+
+    const hotbarCenterY = hotbarY + hotbarSlotSize / 2;
+    const firstSlotCenterX = hotbarX + hotbarSlotSize / 2;
+    const secondSlotCenterX =
+      hotbarX + hotbarSlotSize + hotbarGap + hotbarSlotSize / 2;
+
     this.normalKeyIndicator = this.add
-      .image(84, 30, "chave")
+      .image(firstSlotCenterX, hotbarCenterY, "chave")
       .setDisplaySize(16, 36)
       .setScrollFactor(0)
       .setDepth(100)
       .setVisible(false);
     this.masterKeyIndicator = this.add
-      .image(112, 30, "chaveMestra")
+      .image(secondSlotCenterX, hotbarCenterY, "chaveMestra")
       .setDisplaySize(16, 36)
       .setScrollFactor(0)
       .setDepth(100)
@@ -790,7 +881,7 @@ class AsylumScene extends Phaser.Scene {
     this.input.keyboard.on("keydown-E", () => this.onInteract());
 
     // ESPACO: RASTEJAR ATE A OUTRA VENTILACAO (quando escondido)
-    this.input.keyboard.on("keydown-SPACE", () => this.onCrawlKey());
+    this.input.keyboard.on("keydown-SPACE", () => this.onSpacePressed());
 
     // CAMERA
     this.cameras.main.setBounds(0, 0, this.mapWidth, this.mapHeight);
@@ -829,7 +920,8 @@ class AsylumScene extends Phaser.Scene {
       .text(20, 60, "", {
         fontSize: "16px",
         color: "#eeeeee",
-        backgroundColor: "#111111dd",
+        stroke: "#000000",
+        strokeThickness: 3,
         padding: { x: 9, y: 7 },
       })
       .setScrollFactor(0)
@@ -846,7 +938,7 @@ class AsylumScene extends Phaser.Scene {
       .setDepth(100);
 
     this.doorHint = this.add
-      .text(480, 510, "", {
+      .text(480, 458, "", {
         fontSize: "16px",
         align: "center",
         color: "#ffffff",
@@ -857,9 +949,9 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(110);
 
-    this.say("Encontre a chave e escape.", 6000);
     this.drawStamina();
     this.updateLighting(0, 0);
+    this.createMainMenu();
   }
 
   // ---------------------------------------------------------------
@@ -869,6 +961,156 @@ class AsylumScene extends Phaser.Scene {
   say(text, duration = 3500) {
     this.status.setText(text).setVisible(true);
     this.statusUntil = this.time.now + duration;
+  }
+
+  createMainMenu() {
+    const menu = (this.mainMenu = this.add
+      .container(0, 0)
+      .setScrollFactor(0)
+      .setDepth(200));
+    const add = (object) => {
+      menu.add(object.setScrollFactor(0));
+      return object;
+    };
+
+    add(this.add.rectangle(480, 280, 960, 560, 0x08090c, 0.96));
+    add(this.add.rectangle(52, 280, 4, 430, 0x9c3434));
+
+    add(
+      this.add.text(78, 66, "ASILO · NOITE 01", {
+        fontFamily: "Arial",
+        fontSize: "13px",
+        color: "#c8b98e",
+        letterSpacing: 3,
+      }),
+    );
+    add(
+      this.add.text(76, 132, "ASYLUM\nESCAPE", {
+        fontFamily: "Georgia",
+        fontSize: "58px",
+        color: "#eee8d9",
+        lineSpacing: -10,
+      }),
+    );
+    add(
+      this.add.text(80, 292, "Encontre as chaves. Encontre a saída.", {
+        fontFamily: "Arial",
+        fontSize: "17px",
+        color: "#aaa69d",
+      }),
+    );
+
+    const startFrame = add(
+      this.add.rectangle(276, 395, 400, 58, 0x241718).setStrokeStyle(1, 0x9c3434),
+    );
+    const startPrompt = add(
+      this.add.text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
+        fontFamily: "Arial",
+        fontSize: "17px",
+        fontStyle: "bold",
+        color: "#f1e6ce",
+      }).setOrigin(0.5),
+    );
+    this.tweens.add({
+      targets: [startFrame, startPrompt],
+      alpha: { from: 0.72, to: 1 },
+      duration: 900,
+      yoyo: true,
+      repeat: -1,
+    });
+
+    add(
+      this.add.text(80, 472, "WASD / SETAS  mover     SHIFT  correr", {
+        fontFamily: "Arial",
+        fontSize: "13px",
+        color: "#8f8d88",
+      }),
+    );
+    add(
+      this.add.text(80, 497, "E  interagir     ESPAÇO  rastejar", {
+        fontFamily: "Arial",
+        fontSize: "13px",
+        color: "#8f8d88",
+      }),
+    );
+
+    add(this.add.rectangle(752, 280, 360, 448, 0x111214, 0.98).setStrokeStyle(1, 0x49433a));
+    add(
+      this.add.text(598, 76, "ATUALIZAÇÕES", {
+        fontFamily: "Arial",
+        fontSize: "16px",
+        fontStyle: "bold",
+        color: "#d3bd87",
+        letterSpacing: 2,
+      }),
+    );
+
+    const suggestionsButton = add(
+      this.add
+        .rectangle(839, 77, 170, 34, 0x392020)
+        .setStrokeStyle(1, 0x9c3434)
+        .setInteractive({ useHandCursor: true }),
+    );
+    add(
+      this.add
+        .text(839, 77, "FAÇA SUGESTÕES", {
+          fontFamily: "Arial",
+          fontSize: "12px",
+          fontStyle: "bold",
+          color: "#eadfca",
+        })
+        .setOrigin(0.5),
+    );
+    suggestionsButton.on("pointerover", () =>
+      suggestionsButton.setFillStyle(0x612b2b),
+    );
+    suggestionsButton.on("pointerout", () =>
+      suggestionsButton.setFillStyle(0x392020),
+    );
+    suggestionsButton.on("pointerdown", () => {
+      window.open(
+        "https://github.com/murilloyoung/asylum-escape/issues",
+        "_blank",
+        "noopener,noreferrer",
+      );
+    });
+    add(
+      this.add.text(598, 102, "O QUE MUDOU", {
+        fontFamily: "Arial",
+        fontSize: "11px",
+        color: "#77746e",
+        letterSpacing: 2,
+      }),
+    );
+
+    const updates = [
+      ["MAPA AMPLIADO", "Novas alas a leste e ao sul, com uma saída mais distante."],
+      ["VENTILAÇÃO", "O ar também diminui durante a travessia entre dutos."],
+      ["HOTBAR", "As chaves aparecem nos primeiros espaços da barra."],
+      ["LUZ E CENÁRIO", "Alcance da lanterna ajustado; personagem à frente dos objetos."],
+    ];
+
+    updates.forEach(([title, description], index) => {
+      const y = 154 + index * 86;
+      add(this.add.circle(604, y + 6, 3, 0x9c3434));
+      add(
+        this.add.text(618, y - 5, title, {
+          fontFamily: "Arial",
+          fontSize: "13px",
+          fontStyle: "bold",
+          color: "#e0d7c4",
+        }),
+      );
+      add(
+        this.add.text(618, y + 17, description, {
+          fontFamily: "Arial",
+          fontSize: "12px",
+          color: "#96938c",
+          wordWrap: { width: 286 },
+          lineSpacing: 3,
+        }),
+      );
+    });
   }
 
   drawStamina() {
@@ -1052,7 +1294,7 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla E: sair da ventilacao, entrar numa ou usar uma porta
   onInteract() {
-    if (this.gameOver) return;
+    if (this.gameOver || !this.gameStarted) return;
 
     if (this.ventState === "hidden") {
       this.exitVent(false);
@@ -1072,8 +1314,22 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // tecla ESPACO: rastejar ate a outra ponta
+  onSpacePressed() {
+    if (this.gameOver) return;
+
+    if (!this.gameStarted) {
+      this.gameStarted = true;
+      this.mainMenu.setVisible(false);
+      this.ambientMusic.play();
+      this.say("Encontre a chave e escape.", 6000);
+      return;
+    }
+
+    this.onCrawlKey();
+  }
+
   onCrawlKey() {
-    if (this.gameOver || this.ventState !== "hidden") return;
+    if (this.gameOver || !this.gameStarted || this.ventState !== "hidden") return;
 
     this.crawlVent();
   }
@@ -1194,10 +1450,11 @@ class AsylumScene extends Phaser.Scene {
 
   // o ar acaba escondido; fora da ventilacao ele volta
   updateVent(time, dt) {
-    if (this.ventState === "hidden") {
+    if (this.ventState === "hidden" || this.ventState === "crawling") {
       this.breath = Math.max(0, this.breath - 12.5 * dt);
 
-      if (this.breath <= 0) this.exitVent(true);
+      // Wait until the crawl tween reaches the other vent before forcing an exit.
+      if (this.breath <= 0 && this.ventState === "hidden") this.exitVent(true);
     } else if (this.ventState === "none") {
       this.breath = Math.min(100, this.breath + 15 * dt);
     }
@@ -1477,6 +1734,22 @@ class AsylumScene extends Phaser.Scene {
 
     this.nunState = state;
 
+    const pursuing = state === "chase" || state === "ventHunt";
+    if (pursuing) {
+      if (this.ambientMusic.isPlaying) this.ambientMusic.pause();
+      if (!this.chaseMusic.isPlaying) this.chaseMusic.play();
+    } else {
+      if (this.chaseMusic.isPlaying) this.chaseMusic.stop();
+      if (
+        this.gameStarted &&
+        !this.gameOver &&
+        !this.ambientMusic.isPlaying
+      ) {
+        if (this.ambientMusic.isPaused) this.ambientMusic.resume();
+        else this.ambientMusic.play();
+      }
+    }
+
     // destaca a freira em vermelho enquanto ela persegue a personagem
     this.nunSprite.setTint(
       state === "chase" || state === "ventHunt" ? 0xffb0b0 : 0xffffff,
@@ -1748,7 +2021,10 @@ class AsylumScene extends Phaser.Scene {
               this.ventAt.side === h.entry.side;
 
             if (inside) {
-              this.finish(false, "A freira puxou você para fora da ventilação!");
+              this.finish(
+                false,
+                "A freira puxou você para fora da ventilação!",
+              );
               break;
             }
 
@@ -1882,7 +2158,7 @@ class AsylumScene extends Phaser.Scene {
   // ---------------------------------------------------------------
 
   update(time, delta) {
-    if (this.gameOver) return;
+    if (this.gameOver || !this.gameStarted) return;
 
     const dt = delta / 1000;
     const k = this.keys;
@@ -2007,6 +2283,8 @@ class AsylumScene extends Phaser.Scene {
     this.gameOver = true;
 
     if (this.crawlTween) this.crawlTween.stop();
+    this.ambientMusic.stop();
+    this.chaseMusic.stop();
     this.player.setVisible(true);
     this.footstepSound.stop();
     this.runningSound.stop();
@@ -2034,7 +2312,9 @@ class AsylumScene extends Phaser.Scene {
         480,
         275,
         message ||
-          (won ? "Você conseguiu fugir do asilo!" : "A freira capturou você..."),
+          (won
+            ? "Você conseguiu fugir do asilo!"
+            : "A freira capturou você..."),
         {
           fontSize: "15px",
           color: "#eeeeee",
