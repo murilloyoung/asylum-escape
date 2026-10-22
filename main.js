@@ -527,6 +527,17 @@ class AsylumScene extends Phaser.Scene {
     addWall(750, 850, 300, 24);
     addWall(1150, 850, 300, 24);
 
+    // DIVISOES DA ALA SUL: salas menores com passagens entre elas.
+    addWall(350, 1220, 620, 24);
+    addWall(1150, 1220, 500, 24);
+    addWall(350, 1270, 24, 100);
+    addWall(350, 1490, 24, 180);
+    addWall(900, 1250, 24, 60);
+    addWall(900, 1490, 24, 180);
+    addWall(1500, 1250, 24, 60);
+    addWall(1500, 1490, 24, 180);
+    addWall(1850, 1220, 100, 24);
+
     // ANIMACOES DA MILA: os arquivos sao folhas horizontais de quadros 32x32.
     for (const [key, texture, frames, rate] of [
       ["mila-idle-left", "milaIdleLeft", 4, 4],
@@ -575,17 +586,23 @@ class AsylumScene extends Phaser.Scene {
     this.nun.body.setMaxVelocity(220, 220);
 
     // Moveis e caixas distribuidos pelas alas, usando recortes do tileset.
+    // As novas pecas tambem bloqueiam a passagem e entram na navegacao da freira.
+    this.furnitureRects = [];
     for (const [x, y, frame] of [
       [180, 315, "bedA"],
       [640, 315, "bedB"],
       [1060, 315, "bedA"],
       [1480, 315, "bedB"],
+      [1740, 315, "bedA"],
       [370, 700, "locker"],
       [820, 700, "locker"],
       [1240, 700, "locker"],
+      [1660, 700, "locker"],
       [330, 1040, "crateA"],
       [760, 1040, "crateB"],
       [1160, 1040, "crateA"],
+      [1460, 1120, "crateB"],
+      [2050, 1080, "crateA"],
       [2080, 315, "bedA"],
       [2230, 720, "locker"],
       [1840, 1370, "crateB"],
@@ -593,6 +610,15 @@ class AsylumScene extends Phaser.Scene {
     ]) {
       const furniture = this.add.image(x, y, "insideTiles", frame);
       furniture.setDepth(this.worldDepth(y + furniture.displayHeight / 2));
+      this.physics.add.existing(furniture, true);
+      this.physics.add.collider(this.player, furniture);
+      this.physics.add.collider(this.nun, furniture);
+      this.furnitureRects.push({
+        left: x - furniture.displayWidth / 2,
+        right: x + furniture.displayWidth / 2,
+        top: y - furniture.displayHeight / 2,
+        bottom: y + furniture.displayHeight / 2,
+      });
     }
 
     // COLISOES DAS PAREDES
@@ -702,6 +728,12 @@ class AsylumScene extends Phaser.Scene {
     addDoor(525, 850, 150, 24, false);
     addDoor(950, 850, 100, 24, true);
 
+    // Portas da ala sul, posicionadas nos vaos das novas paredes.
+    addDoor(780, 1220, 180, 24, false);
+    addDoor(350, 1370, 24, 60, false);
+    addDoor(900, 1370, 24, 120, false);
+    addDoor(1500, 1370, 24, 120, false);
+
     this.rebuildObstacles();
 
     // GRADE DE NAVEGACAO (pathfinding da freira)
@@ -709,7 +741,7 @@ class AsylumScene extends Phaser.Scene {
       this.mapWidth,
       this.mapHeight,
       32,
-      this.wallRects,
+      this.wallRects.concat(this.furnitureRects),
       16,
     );
 
@@ -1129,6 +1161,7 @@ class AsylumScene extends Phaser.Scene {
   // lista de obstaculos usada pela lanterna e pela visao da freira
   rebuildObstacles() {
     this.obstacleRects = this.wallRects.concat(
+      this.furnitureRects || [],
       this.doors.filter((d) => !d.isOpen).map((d) => d.rect),
     );
   }
@@ -2204,7 +2237,10 @@ class AsylumScene extends Phaser.Scene {
       this.runningSound.stop();
     }
 
-    const facingLeft = dx !== 0 ? dx < 0 : Math.cos(this.playerFacingAngle) < 0;
+    // Os sprites idle estao nomeados ao contrario da orientacao que mostram.
+    const facingLeft = moving
+      ? dx < 0
+      : Math.cos(this.playerFacingAngle) > 0;
     const direction = facingLeft ? "left" : "right";
     const animation = moving
       ? `mila-${running ? "run" : "walk"}-${direction}`
@@ -2220,7 +2256,7 @@ class AsylumScene extends Phaser.Scene {
     // MIRA DA LANTERNA: mouse (se mexeu recentemente) ou direcao do movimento
     let targetAngle = null;
 
-    if (time - this.lastPointerMoveAt < 2500) {
+    if (!moving || time - this.lastPointerMoveAt < 2500) {
       const pointer = this.input.activePointer;
       const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
 
@@ -2368,8 +2404,8 @@ const config = {
   },
 
   scale: {
-    mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
+    // Mantem o espaco logico usado pelo HUD e pelos menus; o CSS amplia a tela.
+    mode: Phaser.Scale.NONE,
   },
 
   scene: [AsylumScene],
