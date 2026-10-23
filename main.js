@@ -71,6 +71,11 @@ const NAV_DIRS = [
   [-1, -1],
 ];
 
+// Os gatos usam sempre a precisao de pathfinding do nivel maximo.
+const CAT_AI_DIFFICULTY = 10;
+const CAT_REPATH_INTERVAL = 250;
+const CAT_AUDIBLE_RADIUS = 160;
+
 class NavGrid {
   // solids: [{left, right, top, bottom}] — inflate: margem de folga do corpo
   constructor(width, height, cellSize, solids, inflate) {
@@ -115,7 +120,7 @@ class NavGrid {
     });
   }
 
-  isFree(cx, cy) {
+  isFree(cx, cy, blockClosedDoors = false) {
     if (cx < 0 || cy < 0 || cx >= this.cols || cy >= this.rows) return false;
 
     const i = cy * this.cols + cx;
@@ -124,7 +129,7 @@ class NavGrid {
     const doors = this.cellDoors.get(i);
     if (doors) {
       for (const d of doors) {
-        if (!d.isOpen && d.isLocked) return false;
+        if (!d.isOpen && (d.isLocked || blockClosedDoors)) return false;
       }
     }
 
@@ -144,10 +149,10 @@ class NavGrid {
     return { x: (cx + 0.5) * s, y: (cy + 0.5) * s };
   }
 
-  nearestFree(x, y, maxRing = 8) {
+  nearestFree(x, y, maxRing = 8, blockClosedDoors = false) {
     const { cx, cy } = this.toCell(x, y);
 
-    if (this.isFree(cx, cy)) return { cx, cy };
+    if (this.isFree(cx, cy, blockClosedDoors)) return { cx, cy };
 
     for (let r = 1; r <= maxRing; r++) {
       let best = null;
@@ -156,7 +161,7 @@ class NavGrid {
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-          if (!this.isFree(cx + dx, cy + dy)) continue;
+          if (!this.isFree(cx + dx, cy + dy, blockClosedDoors)) continue;
 
           const d = dx * dx + dy * dy;
           if (d < bestD) {
@@ -172,12 +177,16 @@ class NavGrid {
     return null;
   }
 
-  canStep(cx, cy, dx, dy) {
-    if (!this.isFree(cx + dx, cy + dy)) return false;
+  canStep(cx, cy, dx, dy, blockClosedDoors = false) {
+    if (!this.isFree(cx + dx, cy + dy, blockClosedDoors)) return false;
 
     // sem cortar quina de parede na diagonal
     if (dx !== 0 && dy !== 0) {
-      if (!this.isFree(cx + dx, cy) || !this.isFree(cx, cy + dy)) return false;
+      if (
+        !this.isFree(cx + dx, cy, blockClosedDoors) ||
+        !this.isFree(cx, cy + dy, blockClosedDoors)
+      )
+        return false;
     }
 
     return true;
@@ -217,9 +226,9 @@ class NavGrid {
     return visited[cy * this.cols + cx] === 1;
   }
 
-  findPath(sx, sy, tx, ty) {
-    const start = this.nearestFree(sx, sy);
-    const goal = this.nearestFree(tx, ty);
+  findPath(sx, sy, tx, ty, blockClosedDoors = false) {
+    const start = this.nearestFree(sx, sy, 8, blockClosedDoors);
+    const goal = this.nearestFree(tx, ty, 8, blockClosedDoors);
 
     if (!start || !goal) return null;
 
@@ -256,7 +265,7 @@ class NavGrid {
       const cy = (cur / cols) | 0;
 
       for (const [dx, dy] of NAV_DIRS) {
-        if (!this.canStep(cx, cy, dx, dy)) continue;
+        if (!this.canStep(cx, cy, dx, dy, blockClosedDoors)) continue;
 
         const nx = cx + dx;
         const ny = cy + dy;
@@ -358,6 +367,16 @@ class AsylumScene extends Phaser.Scene {
       frameWidth: 32,
       frameHeight: 36,
     });
+    for (const [key, file] of [
+      ["catGrey", "grey/Cat_Grey.png"],
+      ["catGinger", "ginger/Cat_Ginger.png"],
+      ["catMilena", "milena/milena.png"],
+    ]) {
+      this.load.spritesheet(key, `assets/personagens/gatos/${file}`, {
+        frameWidth: 32,
+        frameHeight: 32,
+      });
+    }
     this.load.image("insideTiles", "assets/mapa/Inside_C.png");
     this.load.image("chave", "assets/mapa/itens/chave.png");
     this.load.image("chaveMestra", "assets/mapa/itens/chaveMestra.png");
@@ -366,6 +385,9 @@ class AsylumScene extends Phaser.Scene {
     this.load.audio("gritoFreira", "assets/audios/gritoFeira.mp3");
     this.load.audio("ambiente", "assets/audios/ambiente.mp3");
     this.load.audio("chase", "assets/audios/chase.mp3");
+    this.load.audio("catMeow", "assets/audios/gatos/gatomiando.mp3");
+    this.load.audio("catAngry", "assets/audios/gatos/gatobravo.mp3");
+    this.load.audio("catScratch", "assets/audios/gatos/gatoarranhando.mp3");
   }
 
   create() {
@@ -378,6 +400,10 @@ class AsylumScene extends Phaser.Scene {
     this.chaseMusic = this.sound.add("chase", { loop: true, volume: 0.4 });
     this.hasKey = false;
     this.hasMasterKey = false;
+    this.catMeowSound = this.sound.add("catMeow", { volume: 0.2 });
+    this.catAngrySound = this.sound.add("catAngry", { volume: 0.25 });
+    this.catScratchSound = this.sound.add("catScratch", { volume: 0.18 });
+    this.catSoundCooldown = 0;
 
     this.mapWidth = 2400;
     this.mapHeight = 1600;
@@ -415,6 +441,15 @@ class AsylumScene extends Phaser.Scene {
     this.nunChaseSpeedWithKey = 152;
     this.nunFov = 1.1; // meio angulo de visao (rad)
     this.nunCloseSense = 120; // percebe o jogador perto, mesmo de costas
+    this.difficulty = Phaser.Math.Clamp(
+      this.registry.get("enemyDifficulty") ?? 2,
+      0,
+      10,
+    );
+    this.difficultyPlaySeconds = 0;
+    this.difficultyNextUpdate = 0;
+    this.difficultyFollowMultiplier = 1;
+    this.applyDifficultyTuning(this.difficulty);
     this.nunFacing = Math.PI;
     this.nunDest = null;
     this.nunPath = [];
@@ -588,6 +623,7 @@ class AsylumScene extends Phaser.Scene {
     // Moveis e caixas distribuidos pelas alas, usando recortes do tileset.
     // As novas pecas tambem bloqueiam a passagem e entram na navegacao da freira.
     this.furnitureRects = [];
+    this.furniture = [];
     for (const [x, y, frame] of [
       [180, 315, "bedA"],
       [640, 315, "bedB"],
@@ -613,6 +649,7 @@ class AsylumScene extends Phaser.Scene {
       this.physics.add.existing(furniture, true);
       this.physics.add.collider(this.player, furniture);
       this.physics.add.collider(this.nun, furniture);
+      this.furniture.push(furniture);
       this.furnitureRects.push({
         left: x - furniture.displayWidth / 2,
         right: x + furniture.displayWidth / 2,
@@ -749,6 +786,161 @@ class AsylumScene extends Phaser.Scene {
       this.nav.addDoor(door, door.rect);
     }
 
+    // Debug visual do A* da freira, alternado pela tecla F2.
+    this.debugEnemyAI = false;
+    this.debugDrawAt = 0;
+    this.enemyDebugGrid = this.add.graphics().setDepth(150).setVisible(false);
+    this.enemyDebugPanel = this.add
+      .text(14, 14, "", {
+        fontFamily: "monospace",
+        fontSize: "13px",
+        color: "#e7f2e7",
+        backgroundColor: "#080b0add",
+        padding: { x: 8, y: 6 },
+        lineSpacing: 3,
+      })
+      .setScrollFactor(0)
+      .setDepth(151)
+      .setVisible(false);
+    this.debugCommand = "";
+    this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
+    this.debugCommandFocused = false;
+    this.enemyDebugCommandBar = this.add
+      .text(14, 166, "> \nClique aqui para digitar; Enter executa.", {
+        fontFamily: "monospace",
+        fontSize: "13px",
+        color: "#fff2c7",
+        backgroundColor: "#080b0add",
+        padding: { x: 8, y: 7 },
+        lineSpacing: 3,
+      })
+      .setScrollFactor(0)
+      .setDepth(151)
+      .setInteractive(
+        new Phaser.Geom.Rectangle(0, 0, 720, 58),
+        Phaser.Geom.Rectangle.Contains,
+      )
+      .setVisible(false);
+    this.updateDebugCommandBar();
+    this.input.on("pointerdown", (pointer) => {
+      if (!this.debugEnemyAI) return;
+      this.debugCommandFocused = this.enemyDebugCommandBar
+        .getBounds()
+        .contains(pointer.x, pointer.y);
+      this.debugCommandMessage = this.debugCommandFocused
+        ? "Console ativo. Enter executa; clique fora para sair."
+        : "Clique na caixa para digitar; Enter executa.";
+      this.updateDebugCommandBar();
+    });
+
+    // Gatos aparecem em salas acessiveis e usam a mesma grade da freira.
+    this.cats = [];
+    const catSpawnSpots = [
+      { x: 280, y: 260 },
+      { x: 700, y: 260 },
+      { x: 1100, y: 260 },
+      { x: 1500, y: 260 },
+      { x: 2080, y: 260 },
+      { x: 300, y: 1000 },
+      { x: 700, y: 1000 },
+      { x: 1100, y: 1000 },
+      { x: 1450, y: 1000 },
+      { x: 2200, y: 1420 },
+    ];
+    const validCatSpots = catSpawnSpots.filter((spot) => {
+      const cell = this.nav.nearestFree(spot.x, spot.y);
+      return (
+        cell &&
+        Phaser.Math.Distance.Between(
+          spot.x,
+          spot.y,
+          this.player.x,
+          this.player.y,
+        ) > 220
+      );
+    });
+    const catCount = Phaser.Math.Between(2, 3);
+    const catTextures = ["catGrey", "catGinger", "catMilena"];
+    for (let i = 0; i < catCount && validCatSpots.length; i++) {
+      const spot = Phaser.Utils.Array.RemoveRandomElement(validCatSpots);
+      const texture = Phaser.Utils.Array.GetRandom(catTextures);
+      const idleAnimation = `${texture}-idle`;
+      if (!this.anims.exists(idleAnimation)) {
+        this.anims.create({
+          key: idleAnimation,
+          frames: this.anims.generateFrameNumbers(texture, {
+            start: 0,
+            end: 3,
+          }),
+          frameRate: 4,
+          repeat: -1,
+        });
+        this.anims.create({
+          key: `${texture}-walk`,
+          frames: this.anims.generateFrameNumbers(texture, {
+            start: 32,
+            end: 39,
+          }),
+          frameRate: 8,
+          repeat: -1,
+        });
+        this.anims.create({
+          key: `${texture}-run`,
+          frames: this.anims.generateFrameNumbers(texture, {
+            start: 206,
+            end: 211,
+          }),
+          frameRate: 12,
+          repeat: -1,
+        });
+        const scratchFrames = [
+          [459, 463],
+          [469, 473],
+          [474, 481],
+          [464, 468],
+        ].flatMap(([start, end]) =>
+          this.anims.generateFrameNumbers(texture, { start, end }),
+        );
+        this.anims.create({
+          key: `${texture}-scratch`,
+          frames: scratchFrames,
+          frameRate: 8,
+          repeat: 0,
+        });
+      }
+      const cat = this.add
+        .container(spot.x, spot.y)
+        .setDepth(this.worldDepth(spot.y));
+      cat.sprite = this.add.sprite(0, 0, texture, 0).setScale(1.35);
+      cat.sprite.play(idleAnimation);
+      cat.idleAnimation = idleAnimation;
+      cat.walkAnimation = `${texture}-walk`;
+      cat.runAnimation = `${texture}-run`;
+      cat.scratchAnimation = `${texture}-scratch`;
+      cat.scratchPlaying = false;
+      cat.sprite.on("animationcomplete", (animation) => {
+        if (animation.key !== cat.scratchAnimation) return;
+        cat.scratchPlaying = false;
+        cat.sprite.play(cat.idleAnimation);
+      });
+      cat.add(cat.sprite);
+      this.physics.add.existing(cat);
+      cat.body.setSize(20, 18).setOffset(-10, -9).setCollideWorldBounds(true);
+      cat.path = [];
+      cat.dest = null;
+      cat.repathAt = 0;
+      cat.fleeUntil = 0;
+      cat.wasScared = false;
+      cat.angryPlayed = false;
+      cat.meowAt = this.time.now + Phaser.Math.Between(2500, 7000);
+      cat.scratchAt = this.time.now + Phaser.Math.Between(5000, 11000);
+      for (const wall of this.walls) this.physics.add.collider(cat, wall);
+      for (const furniture of this.furniture)
+        this.physics.add.collider(cat, furniture);
+      for (const door of this.doors) this.physics.add.collider(cat, door);
+      this.cats.push(cat);
+    }
+
     // CHAVE EM LOCAL ALEATORIO (sempre alcancavel sem passar por porta trancada)
     const keySpots = [
       { x: 280, y: 260 },
@@ -823,8 +1015,9 @@ class AsylumScene extends Phaser.Scene {
 
     this.keyItem = addCollectibleKey(normalKeySpot, "chave", () => {
       this.hasKey = true;
+      this.catGuideTarget = masterKeySpot;
       this.normalKeyIndicator.setVisible(true);
-      this.nunChaseSpeed = this.nunChaseSpeedWithKey;
+      this.applyDifficultyTuning(this.difficulty);
       this.say(
         "Voce encontrou a chave das portas! A freira ouviu o barulho...",
         5000,
@@ -834,12 +1027,13 @@ class AsylumScene extends Phaser.Scene {
         this.setNunDestination(this.player.x, this.player.y);
       }
     });
-
     this.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", () => {
       this.hasMasterKey = true;
       this.masterKeyIndicator.setVisible(true);
+      this.catGuideTarget = { x: 2290, y: 1470 };
       this.say("Voce encontrou a chave mestra. Agora alcance a saida!", 5000);
     });
+    this.catGuideTarget = normalKeySpot;
     // SAIDA
     this.exit = this.add.rectangle(2290, 1470, 70, 90, 0x522d2d);
 
@@ -864,6 +1058,21 @@ class AsylumScene extends Phaser.Scene {
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,SPACE",
+    );
+    this.input.keyboard.on("keydown-F2", () => {
+      this.debugEnemyAI = !this.debugEnemyAI;
+      this.enemyDebugGrid.setVisible(this.debugEnemyAI);
+      this.enemyDebugPanel.setVisible(this.debugEnemyAI);
+      this.enemyDebugCommandBar.setVisible(this.debugEnemyAI);
+      this.debugCommandFocused = false;
+      this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
+      this.updateDebugCommandBar();
+      if (!this.debugEnemyAI) this.enemyDebugGrid.clear();
+      else this.drawEnemyDebug(this.time.now, true);
+    });
+    this.input.keyboard.addCapture(Phaser.Input.Keyboard.KeyCodes.F2);
+    this.input.keyboard.on("keydown", (event) =>
+      this.handleDebugCommandKey(event),
     );
 
     // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
@@ -1033,15 +1242,19 @@ class AsylumScene extends Phaser.Scene {
     );
 
     const startFrame = add(
-      this.add.rectangle(276, 395, 400, 58, 0x241718).setStrokeStyle(1, 0x9c3434),
+      this.add
+        .rectangle(276, 395, 400, 58, 0x241718)
+        .setStrokeStyle(1, 0x9c3434),
     );
     const startPrompt = add(
-      this.add.text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
-        fontFamily: "Arial",
-        fontSize: "17px",
-        fontStyle: "bold",
-        color: "#f1e6ce",
-      }).setOrigin(0.5),
+      this.add
+        .text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
+          fontFamily: "Arial",
+          fontSize: "17px",
+          fontStyle: "bold",
+          color: "#f1e6ce",
+        })
+        .setOrigin(0.5),
     );
     this.tweens.add({
       targets: [startFrame, startPrompt],
@@ -1066,7 +1279,11 @@ class AsylumScene extends Phaser.Scene {
       }),
     );
 
-    add(this.add.rectangle(752, 280, 360, 448, 0x111214, 0.98).setStrokeStyle(1, 0x49433a));
+    add(
+      this.add
+        .rectangle(752, 280, 360, 448, 0x111214, 0.98)
+        .setStrokeStyle(1, 0x49433a),
+    );
     add(
       this.add.text(598, 76, "ATUALIZAÇÕES", {
         fontFamily: "Arial",
@@ -1116,10 +1333,16 @@ class AsylumScene extends Phaser.Scene {
     );
 
     const updates = [
-      ["MAPA AMPLIADO", "Novas alas a leste e ao sul, com uma saída mais distante."],
+      [
+        "MAPA AMPLIADO",
+        "Novas alas a leste e ao sul, com uma saída mais distante.",
+      ],
       ["VENTILAÇÃO", "O ar também diminui durante a travessia entre dutos."],
       ["HOTBAR", "As chaves aparecem nos primeiros espaços da barra."],
-      ["LUZ E CENÁRIO", "Alcance da lanterna ajustado; personagem à frente dos objetos."],
+      [
+        "LUZ E CENÁRIO",
+        "Alcance da lanterna ajustado; personagem à frente dos objetos.",
+      ],
     ];
 
     updates.forEach(([title, description], index) => {
@@ -1327,6 +1550,7 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla E: sair da ventilacao, entrar numa ou usar uma porta
   onInteract() {
+    if (this.debugCommandFocused) return;
     if (this.gameOver || !this.gameStarted) return;
 
     if (this.ventState === "hidden") {
@@ -1348,6 +1572,7 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla ESPACO: rastejar ate a outra ponta
   onSpacePressed() {
+    if (this.debugCommandFocused) return;
     if (this.gameOver) return;
 
     if (!this.gameStarted) {
@@ -1362,7 +1587,8 @@ class AsylumScene extends Phaser.Scene {
   }
 
   onCrawlKey() {
-    if (this.gameOver || !this.gameStarted || this.ventState !== "hidden") return;
+    if (this.gameOver || !this.gameStarted || this.ventState !== "hidden")
+      return;
 
     this.crawlVent();
   }
@@ -1758,6 +1984,232 @@ class AsylumScene extends Phaser.Scene {
     this.darkTexture.refresh();
   }
 
+  drawEnemyDebug(now, force = false) {
+    if (!this.debugEnemyAI || (!force && now < this.debugDrawAt)) return;
+    this.debugDrawAt = now + 160;
+
+    const g = this.enemyDebugGrid;
+    const cam = this.cameras.main;
+    const size = this.nav.cellSize;
+    const left = Math.max(0, Math.floor(cam.scrollX / size));
+    const top = Math.max(0, Math.floor(cam.scrollY / size));
+    const right = Math.min(
+      this.nav.cols - 1,
+      Math.ceil((cam.scrollX + cam.width / cam.zoom) / size),
+    );
+    const bottom = Math.min(
+      this.nav.rows - 1,
+      Math.ceil((cam.scrollY + cam.height / cam.zoom) / size),
+    );
+
+    g.clear();
+    g.lineStyle(1, 0x9fc69f, 0.18);
+    for (let cx = left; cx <= right; cx++) {
+      const x = cx * size;
+      g.lineBetween(x, top * size, x, (bottom + 1) * size);
+    }
+    for (let cy = top; cy <= bottom; cy++) {
+      const y = cy * size;
+      g.lineBetween(left * size, y, (right + 1) * size, y);
+    }
+
+    g.fillStyle(0xff3b3b, 0.25);
+    for (let cy = top; cy <= bottom; cy++) {
+      for (let cx = left; cx <= right; cx++) {
+        if (!this.nav.isFree(cx, cy)) {
+          g.fillRect(cx * size + 1, cy * size + 1, size - 2, size - 2);
+        }
+      }
+    }
+
+    if (this.nunPath.length) {
+      g.lineStyle(4, 0xffcf4a, 0.95);
+      g.beginPath();
+      g.moveTo(this.nun.x, this.nun.y);
+      for (const point of this.nunPath) g.lineTo(point.x, point.y);
+      g.strokePath();
+      g.fillStyle(0xffcf4a, 1);
+      for (const point of this.nunPath) g.fillCircle(point.x, point.y, 5);
+    } else if (this.nunDest) {
+      g.lineStyle(3, 0xffcf4a, 0.8);
+      g.lineBetween(this.nun.x, this.nun.y, this.nunDest.x, this.nunDest.y);
+      g.fillStyle(0xffcf4a, 1);
+      g.fillCircle(this.nunDest.x, this.nunDest.y, 6);
+    }
+
+    const catPathColors = [0x61d9ff, 0xffa85c, 0xd29aff];
+    this.cats.forEach((cat, index) => {
+      const color = catPathColors[index % catPathColors.length];
+      if (cat.path.length) {
+        g.lineStyle(3, color, 0.95);
+        g.beginPath();
+        g.moveTo(cat.x, cat.y);
+        for (const point of cat.path) g.lineTo(point.x, point.y);
+        g.strokePath();
+        g.fillStyle(color, 1);
+        for (const point of cat.path) g.fillCircle(point.x, point.y, 4);
+      }
+      if (cat.dest) {
+        g.lineStyle(2, color, 0.75);
+        g.fillStyle(color, 1);
+        g.fillCircle(cat.dest.x, cat.dest.y, 6);
+      }
+    });
+
+    const destination = this.nunDest
+      ? `${Math.round(this.nunDest.x)}, ${Math.round(this.nunDest.y)}`
+      : "parada";
+    const lockedDoors = this.doors.filter(
+      (door) => door.isLocked && !door.isOpen,
+    ).length;
+    this.enemyDebugPanel.setText([
+      "DEBUG IA  [F2]",
+      `Freira: ${this.nunState} | A*: ligado`,
+      `Caminho: ${this.nunPath.length}${this.nunPathFailed ? " (sem rota)" : ""}`,
+      `Destino: ${destination}`,
+      `Portas trancadas: ${lockedDoors}`,
+      `Gatos: ${this.cats.length} | A*: nivel ${CAT_AI_DIFFICULTY}`,
+      `Freira: nivel ${this.difficulty.toFixed(2)} (${this.difficultyFollowMultiplier.toFixed(1)}x seguindo gato)`,
+    ]);
+  }
+
+  applyDifficultyTuning(level) {
+    const f = Phaser.Math.Clamp(level / 10, 0, 1);
+    const value = (low, high) => Phaser.Math.Linear(low, high, f);
+    this.nunWanderSpeed = value(55, 82);
+    this.nunInvestigateSpeed = value(76, 112);
+    const chaseSpeed = value(98, 142);
+    this.nunChaseSpeedWithKey = chaseSpeed + value(18, 28);
+    this.nunChaseSpeed = this.hasKey
+      ? this.nunChaseSpeedWithKey
+      : chaseSpeed;
+    this.nunCloseSense = value(90, 145);
+    this.nunFov = value(0.8, 1.1);
+    this.nunVisionRange = value(275, 430);
+    this.nunRunningVisionBonus = value(65, 105);
+    this.nunHearingRange = value(260, 470);
+  }
+
+  setDebugDifficulty(level) {
+    this.difficulty = Phaser.Math.Clamp(level, 0, 10);
+    this.applyDifficultyTuning(this.difficulty);
+    this.nunRepathAt = 0;
+    this.registry.set("enemyDifficulty", this.difficulty);
+  }
+
+  isPlayerFollowingCat() {
+    const playerVelocity = this.player.body.velocity;
+    const playerSpeed = Math.hypot(playerVelocity.x, playerVelocity.y);
+    if (playerSpeed < 25) return false;
+
+    return this.cats.some((cat) => {
+      if (this.time.now < cat.fleeUntil) return false;
+      const catSpeed = Math.hypot(cat.body.velocity.x, cat.body.velocity.y);
+      if (catSpeed < 20) return false;
+      if (
+        Phaser.Math.Distance.Between(
+          this.player.x,
+          this.player.y,
+          cat.x,
+          cat.y,
+        ) > 190
+      ) {
+        return false;
+      }
+
+      const alignment =
+        (playerVelocity.x * cat.body.velocity.x +
+          playerVelocity.y * cat.body.velocity.y) /
+        (playerSpeed * catSpeed);
+      return alignment > 0.2;
+    });
+  }
+
+  updateAdaptiveDifficulty(now, delta) {
+    if (!this.gameStarted || this.gameOver) return;
+
+    this.difficultyPlaySeconds += delta / 1000;
+    if (now < this.difficultyNextUpdate) return;
+    this.difficultyNextUpdate = now + 1000;
+    this.difficultyFollowMultiplier = this.isPlayerFollowingCat() ? 1.5 : 1;
+
+    const previous = this.difficulty;
+    const gain = (0.45 / 60) * this.difficultyFollowMultiplier;
+    this.difficulty = Phaser.Math.Clamp(this.difficulty + gain, 0, 10);
+    if (this.difficulty !== previous) {
+      this.applyDifficultyTuning(this.difficulty);
+      this.nunRepathAt = 0;
+      this.registry.set("enemyDifficulty", this.difficulty);
+    }
+  }
+
+  updateDebugCommandBar() {
+    if (!this.enemyDebugCommandBar) return;
+    this.enemyDebugCommandBar.setText(
+      `> ${this.debugCommand}\n${this.debugCommandMessage}`,
+    );
+  }
+
+  handleDebugCommandKey(event) {
+    if (!this.debugEnemyAI || !this.debugCommandFocused || event.code === "F2")
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.key === "Enter") {
+      const command = this.debugCommand.trim();
+      const goto = command.match(
+        /^goto\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)$/i,
+      );
+      const difficulty = command.match(
+        /^(?:difficulty|d)\s+([0-9]+(?:\.[0-9]+)?)$/i,
+      );
+      if (/^(?:help|\?)$/i.test(command)) {
+        this.debugCommandMessage = "Comandos: difficulty 0-10, status, repath, goto X Y";
+      } else if (/^status$/i.test(command)) {
+        this.debugCommandMessage = `Freira: ${this.nunState}; A*: ligado; pontos: ${this.nunPath.length}.`;
+      } else if (/^repath$/i.test(command)) {
+        if (this.nunDest) {
+          this.setNunDestination(this.nunDest.x, this.nunDest.y);
+          this.nunRepathAt = 0;
+          this.debugCommandMessage = "Rota recalculada.";
+        } else {
+          this.debugCommandMessage = "A freira ainda nao tem destino.";
+        }
+      } else if (goto) {
+        const x = Phaser.Math.Clamp(Number(goto[1]), 0, this.mapWidth);
+        const y = Phaser.Math.Clamp(Number(goto[2]), 0, this.mapHeight);
+        this.setNunState("investigate");
+        this.setNunDestination(x, y);
+        this.debugCommandMessage = `Destino definido: ${Math.round(x)}, ${Math.round(y)}.`;
+      } else if (difficulty) {
+        const level = Number(difficulty[1]);
+        if (level >= 0 && level <= 10) {
+          this.setDebugDifficulty(level);
+          this.debugCommandMessage = `Dificuldade manual definida: ${level.toFixed(1)}.`;
+        } else {
+          this.debugCommandMessage = "Use um valor entre 0 e 10.";
+        }
+      } else {
+        this.debugCommandMessage = "Comando invalido. Digite help.";
+      }
+      this.debugCommand = "";
+      this.updateDebugCommandBar();
+      return;
+    }
+
+    if (event.key === "Backspace") {
+      this.debugCommand = this.debugCommand.slice(0, -1);
+    } else if (event.key === "Escape") {
+      this.debugCommand = "";
+      this.debugCommandFocused = false;
+      this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
+    } else if (event.key.length === 1 && /^[a-z0-9 ._-]$/i.test(event.key)) {
+      this.debugCommand += event.key;
+    }
+    this.updateDebugCommandBar();
+  }
+
   // ---------------------------------------------------------------
   // FREIRA
   // ---------------------------------------------------------------
@@ -1773,11 +2225,7 @@ class AsylumScene extends Phaser.Scene {
       if (!this.chaseMusic.isPlaying) this.chaseMusic.play();
     } else {
       if (this.chaseMusic.isPlaying) this.chaseMusic.stop();
-      if (
-        this.gameStarted &&
-        !this.gameOver &&
-        !this.ambientMusic.isPlaying
-      ) {
+      if (this.gameStarted && !this.gameOver && !this.ambientMusic.isPlaying) {
         if (this.ambientMusic.isPaused) this.ambientMusic.resume();
         else this.ambientMusic.play();
       }
@@ -1789,11 +2237,151 @@ class AsylumScene extends Phaser.Scene {
     );
   }
 
+  updateCats(now) {
+    for (const cat of this.cats) {
+      const distanceToNun = Phaser.Math.Distance.Between(
+        cat.x,
+        cat.y,
+        this.nun.x,
+        this.nun.y,
+      );
+      const distanceToPlayer = Phaser.Math.Distance.Between(
+        cat.x,
+        cat.y,
+        this.player.x,
+        this.player.y,
+      );
+      const playerCanHearCat = distanceToPlayer <= CAT_AUDIBLE_RADIUS;
+      const scared = distanceToNun < 210;
+      if (scared) cat.fleeUntil = now + 700;
+      const fleeing = now < cat.fleeUntil;
+      if (fleeing) {
+        if (!cat.wasScared) {
+          if (cat.scratchPlaying) cat.sprite.stop();
+          cat.scratchPlaying = false;
+          cat.repathAt = 0;
+        }
+      }
+      if (
+        fleeing &&
+        !cat.angryPlayed &&
+        playerCanHearCat &&
+        now >= this.catSoundCooldown
+      ) {
+        this.catAngrySound.play();
+        this.catSoundCooldown = now + 900;
+        cat.angryPlayed = true;
+      }
+      if (!fleeing) cat.angryPlayed = false;
+      cat.wasScared = fleeing;
+
+      if (!fleeing && now >= cat.meowAt) {
+        if (playerCanHearCat && now >= this.catSoundCooldown) {
+          this.catMeowSound.play();
+          this.catSoundCooldown = now + 500;
+          cat.meowAt = now + Phaser.Math.Between(7000, 13000);
+        } else {
+          cat.meowAt = now + 500;
+        }
+      }
+
+      if (now >= cat.repathAt) {
+        if (fleeing) {
+          const angle = Phaser.Math.Angle.Between(
+            this.nun.x,
+            this.nun.y,
+            cat.x,
+            cat.y,
+          );
+          const fleeTarget = {
+            x: Phaser.Math.Clamp(
+              cat.x + Math.cos(angle) * 250,
+              24,
+              this.mapWidth - 24,
+            ),
+            y: Phaser.Math.Clamp(
+              cat.y + Math.sin(angle) * 250,
+              24,
+              this.mapHeight - 24,
+            ),
+          };
+          cat.dest = fleeTarget;
+        } else {
+          cat.dest = this.catGuideTarget;
+        }
+        const path =
+          cat.dest &&
+          this.nav.findPath(cat.x, cat.y, cat.dest.x, cat.dest.y, true);
+        cat.path = path || [];
+        cat.repathAt = now + CAT_REPATH_INTERVAL;
+      }
+
+      const atGuide =
+        !fleeing &&
+        cat.dest &&
+        Phaser.Math.Distance.Between(cat.x, cat.y, cat.dest.x, cat.dest.y) < 58;
+      if (atGuide) {
+        cat.body.setVelocity(0, 0);
+        if (!fleeing && !cat.scratchPlaying && now >= cat.scratchAt) {
+          if (playerCanHearCat) this.catScratchSound.play();
+          cat.scratchPlaying = true;
+          cat.sprite.play(cat.scratchAnimation);
+          cat.scratchAt = now + Phaser.Math.Between(9000, 16000);
+        } else if (
+          !cat.scratchPlaying &&
+          cat.sprite.anims.currentAnim?.key !== cat.idleAnimation
+        ) {
+          cat.sprite.play(cat.idleAnimation);
+        }
+        continue;
+      }
+
+      while (
+        cat.path.length &&
+        Phaser.Math.Distance.Between(
+          cat.x,
+          cat.y,
+          cat.path[0].x,
+          cat.path[0].y,
+        ) < 12
+      ) {
+        cat.path.shift();
+      }
+      const target = cat.path[0];
+      if (!target) {
+        cat.body.setVelocity(0, 0);
+        if (cat.scratchPlaying) {
+          cat.sprite.stop();
+          cat.scratchPlaying = false;
+        }
+        if (cat.sprite.anims.currentAnim?.key !== cat.idleAnimation) {
+          cat.sprite.play(cat.idleAnimation);
+        }
+        continue;
+      }
+      if (cat.scratchPlaying) {
+        cat.sprite.stop();
+        cat.scratchPlaying = false;
+      }
+      const moveAnimation = fleeing ? cat.runAnimation : cat.walkAnimation;
+      if (cat.sprite.anims.currentAnim?.key !== moveAnimation) {
+        cat.sprite.play(moveAnimation);
+      }
+      const angle = Phaser.Math.Angle.Between(cat.x, cat.y, target.x, target.y);
+      cat.body.setVelocity(
+        Math.cos(angle) * (fleeing ? 125 : 72),
+        Math.sin(angle) * (fleeing ? 125 : 72),
+      );
+      cat.setDepth(this.worldDepth(cat.y));
+    }
+  }
+
   // calcula o caminho ate o destino
   setNunDestination(x, y) {
     this.nunDest = { x, y };
 
     const path = this.nav.findPath(this.nun.x, this.nun.y, x, y);
+    if (path && path.length > 1) path.shift();
 
     this.nunPathFailed = !path;
     this.nunPath = path || [];
@@ -1963,6 +2551,7 @@ class AsylumScene extends Phaser.Scene {
   }
 
   updateNun(now, delta) {
+    this.updateAdaptiveDifficulty(now, delta);
     const nun = this.nun;
     const px = this.player.x;
     const py = this.player.y;
@@ -1980,10 +2569,14 @@ class AsylumScene extends Phaser.Scene {
     }
 
     // PERCEPCAO
-    const visionRange = this.playerRunning ? 430 : 330;
+    const visionRange =
+      this.nunVisionRange +
+      (this.playerRunning ? this.nunRunningVisionBonus : 0);
     const seesPlayer = this.nunCanSee(visionRange);
     const heardPlayer =
-      this.playerRunning && this.ventState === "none" && dist <= 380;
+      this.playerRunning &&
+      this.ventState === "none" &&
+      dist <= this.nunHearingRange;
 
     if (seesPlayer) {
       if (this.nunState !== "chase") this.onNunSpotted();
@@ -2203,6 +2796,11 @@ class AsylumScene extends Phaser.Scene {
     if (k.W.isDown || k.UP.isDown) dy--;
     if (k.S.isDown || k.DOWN.isDown) dy++;
 
+    if (this.debugEnemyAI && this.debugCommandFocused) {
+      dx = 0;
+      dy = 0;
+    }
+
     // dentro da ventilacao o jogador nao anda
     if (this.ventState !== "none") {
       dx = 0;
@@ -2238,9 +2836,7 @@ class AsylumScene extends Phaser.Scene {
     }
 
     // Os sprites idle estao nomeados ao contrario da orientacao que mostram.
-    const facingLeft = moving
-      ? dx < 0
-      : Math.cos(this.playerFacingAngle) > 0;
+    const facingLeft = moving ? dx < 0 : Math.cos(this.playerFacingAngle) > 0;
     const direction = facingLeft ? "left" : "right";
     const animation = moving
       ? `mila-${running ? "run" : "walk"}-${direction}`
@@ -2288,6 +2884,8 @@ class AsylumScene extends Phaser.Scene {
 
     // FREIRA
     this.updateNun(time, delta);
+    if (this.debugEnemyAI) this.drawEnemyDebug(time);
+    this.updateCats(time);
 
     // MEDO: quanto mais perto a freira, mais o coracao bate e a luz falha
     const nunDist = Phaser.Math.Distance.Between(
@@ -2315,6 +2913,8 @@ class AsylumScene extends Phaser.Scene {
   // FINAL DO JOGO
   finish(won, message) {
     if (this.gameOver) return;
+
+    this.registry.set("enemyDifficulty", this.difficulty);
 
     this.gameOver = true;
 
