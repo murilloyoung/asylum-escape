@@ -311,6 +311,54 @@ class NavGrid {
 }
 // ==== NAV END ====
 
+// ==== CONFIGURACAO DA DIFICULDADE E IA (valores faceis de ajustar) ====
+const ENEMY_DIFFICULTY = {
+  min: 0,
+  max: 10,
+  start: 2,
+  adaptIntervalMs: 1000,
+  survivalGainPerMinute: 0.45,
+  itemGain: 0.25,
+  escapeGain: 0.45,
+  caughtLoss: 1.25,
+  nearMissLoss: 0.2,
+  nearMissDistance: 145,
+  chaseEndNearMissMs: 4500,
+  pathfindingThreshold: 5,
+  pathfindingBlendRange: 1.2,
+  debugRefreshMs: 160,
+  visionHalfAngle: 1.1,
+  patrolPoints: [
+    { x: 280, y: 260 },
+    { x: 700, y: 260 },
+    { x: 1100, y: 260 },
+    { x: 1500, y: 260 },
+    { x: 2100, y: 260 },
+    { x: 300, y: 700 },
+    { x: 1100, y: 700 },
+    { x: 1700, y: 700 },
+    { x: 300, y: 1100 },
+    { x: 1100, y: 1100 },
+    { x: 1800, y: 1100 },
+    { x: 2100, y: 1400 },
+  ],
+  values: {
+    wanderSpeed: [55, 82],
+    investigateSpeed: [76, 112],
+    chaseSpeed: [98, 142],
+    chaseSpeedWithKeyBonus: [18, 28],
+    visionRange: [275, 430],
+    runningVisionBonus: [65, 105],
+    hearingRange: [260, 470],
+    closeSense: [90, 145],
+    chaseMemoryMs: [900, 4200],
+    ventHuntMs: [25000, 50000],
+    searchDurationMs: [2500, 8500],
+    patrolWaitMs: [1500, 500],
+    repathMs: [520, 280],
+  },
+};
+
 // ==== VENT CONFIG ====
 // Cada par de ventilacoes se liga: entra numa, sai na outra.
 // (posicoes escolhidas para nao cair em cima de moveis, chaves ou paredes)
@@ -409,12 +457,11 @@ class AsylumScene extends Phaser.Scene {
 
     // FREIRA
     this.nunState = "patrol"; // patrol | investigate | chase | search
-    this.nunWanderSpeed = 68;
-    this.nunInvestigateSpeed = 95;
-    this.nunChaseSpeed = 120;
-    this.nunChaseSpeedWithKey = 152;
-    this.nunFov = 1.1; // meio angulo de visao (rad)
-    this.nunCloseSense = 120; // percebe o jogador perto, mesmo de costas
+    this.nunWanderSpeed = ENEMY_DIFFICULTY.values.wanderSpeed[0];
+    this.nunInvestigateSpeed = ENEMY_DIFFICULTY.values.investigateSpeed[0];
+    this.nunChaseSpeed = ENEMY_DIFFICULTY.values.chaseSpeed[0];
+    this.nunFov = ENEMY_DIFFICULTY.visionHalfAngle;
+    this.nunCloseSense = ENEMY_DIFFICULTY.values.closeSense[0];
     this.nunFacing = Math.PI;
     this.nunDest = null;
     this.nunPath = [];
@@ -428,6 +475,28 @@ class AsylumScene extends Phaser.Scene {
     this.nunLastPos = { x: 1550, y: 1000 };
     this.nunStuckCheckAt = 0;
     this.nunHunt = null; // quando ela viu voce entrar numa ventilacao
+    this.difficulty = Phaser.Math.Clamp(
+      this.registry.get("enemyDifficulty") ?? ENEMY_DIFFICULTY.start,
+      ENEMY_DIFFICULTY.min,
+      ENEMY_DIFFICULTY.max,
+    );
+    this.difficultyPlaySeconds = 0;
+    this.difficultyNextUpdate = 0;
+    this.difficultyItems = 0;
+    this.difficultyEscapes = 0;
+    this.difficultyCatches = 0;
+    this.difficultyNearMisses = 0;
+    this.nunChaseStartedAt = 0;
+    this.nunNearMissCounted = false;
+    this.pathfindingBlend = 0;
+    this.adaptiveTuning = null;
+    // Calcula os parametros ja na criacao, para adaptiveTuning nunca ficar nulo.
+    this.refreshDifficultyTuning();
+    this.debugEnemyAI = false;
+    this.debugDrawAt = 0;
+    this.debugCommand = "";
+    this.debugCommandMessage = "Clique aqui para digitar: difficulty 0-10";
+    this.debugCommandFocused = false;
 
     // VENTILACOES
     this.ventState = "none"; // none | hidden | crawling
@@ -436,6 +505,7 @@ class AsylumScene extends Phaser.Scene {
     this.crawlDuration = 2000;
     this.breath = 100; // "ar" para ficar escondido (acaba em ~8s)
     this.crawlTween = null;
+    this.ventEscapePending = false;
 
     // LANTERNA
     this.lightRange = 200;
@@ -749,6 +819,43 @@ class AsylumScene extends Phaser.Scene {
       this.nav.addDoor(door, door.rect);
     }
 
+    this.enemyDebugGrid = this.add.graphics().setDepth(91).setVisible(false);
+    this.enemyDebugPanel = this.add
+      .text(14, 92, "", {
+        fontFamily: "monospace",
+        fontSize: "13px",
+        color: "#e7f2e7",
+        backgroundColor: "#080b0add",
+        padding: { x: 8, y: 6 },
+        lineSpacing: 3,
+      })
+      .setScrollFactor(0)
+      .setDepth(150)
+      .setInteractive({ useHandCursor: true })
+      .setVisible(false);
+    // A barra de comando precisa existir ANTES de qualquer listener que a use.
+    this.enemyDebugCommandBar = this.add
+      .text(14, 270, "", {
+        fontFamily: "monospace",
+        fontSize: "14px",
+        color: "#fff2c7",
+        backgroundColor: "#080b0add",
+        padding: { x: 8, y: 7 },
+      })
+      .setScrollFactor(0)
+      .setDepth(150)
+      .setVisible(false);
+    this.input.on("pointerdown", (pointer) => {
+      if (!this.debugEnemyAI) return;
+      this.debugCommandFocused = this.enemyDebugCommandBar
+        .getBounds()
+        .contains(pointer.x, pointer.y);
+      this.debugCommandMessage = this.debugCommandFocused
+        ? "Console ativo. Enter executa; clique fora para sair."
+        : "Clique na caixa para digitar: difficulty 0-10";
+      this.updateDebugCommandBar();
+    });
+
     // CHAVE EM LOCAL ALEATORIO (sempre alcancavel sem passar por porta trancada)
     const keySpots = [
       { x: 280, y: 260 },
@@ -816,6 +923,8 @@ class AsylumScene extends Phaser.Scene {
         if (this.gameOver || item.collected) return;
         item.collected = true;
         item.destroy();
+        this.difficultyItems++;
+        this.changeDifficulty(ENEMY_DIFFICULTY.itemGain);
         onCollect();
       });
       return item;
@@ -824,7 +933,6 @@ class AsylumScene extends Phaser.Scene {
     this.keyItem = addCollectibleKey(normalKeySpot, "chave", () => {
       this.hasKey = true;
       this.normalKeyIndicator.setVisible(true);
-      this.nunChaseSpeed = this.nunChaseSpeedWithKey;
       this.say(
         "Voce encontrou a chave das portas! A freira ouviu o barulho...",
         5000,
@@ -864,6 +972,20 @@ class AsylumScene extends Phaser.Scene {
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,SPACE",
+    );
+    this.input.keyboard.on("keydown-F3", () => {
+      this.debugEnemyAI = !this.debugEnemyAI;
+      this.enemyDebugGrid.setVisible(this.debugEnemyAI);
+      this.enemyDebugPanel.setVisible(this.debugEnemyAI);
+      this.enemyDebugCommandBar.setVisible(this.debugEnemyAI);
+      this.debugCommandFocused = false;
+      this.debugCommandMessage =
+        "Clique na caixa para digitar: difficulty 0-10";
+      this.updateDebugCommandBar();
+      if (!this.debugEnemyAI) this.enemyDebugGrid.clear();
+    });
+    this.input.keyboard.on("keydown", (event) =>
+      this.handleDebugCommandKey(event),
     );
 
     // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
@@ -1033,15 +1155,19 @@ class AsylumScene extends Phaser.Scene {
     );
 
     const startFrame = add(
-      this.add.rectangle(276, 395, 400, 58, 0x241718).setStrokeStyle(1, 0x9c3434),
+      this.add
+        .rectangle(276, 395, 400, 58, 0x241718)
+        .setStrokeStyle(1, 0x9c3434),
     );
     const startPrompt = add(
-      this.add.text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
-        fontFamily: "Arial",
-        fontSize: "17px",
-        fontStyle: "bold",
-        color: "#f1e6ce",
-      }).setOrigin(0.5),
+      this.add
+        .text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
+          fontFamily: "Arial",
+          fontSize: "17px",
+          fontStyle: "bold",
+          color: "#f1e6ce",
+        })
+        .setOrigin(0.5),
     );
     this.tweens.add({
       targets: [startFrame, startPrompt],
@@ -1066,7 +1192,11 @@ class AsylumScene extends Phaser.Scene {
       }),
     );
 
-    add(this.add.rectangle(752, 280, 360, 448, 0x111214, 0.98).setStrokeStyle(1, 0x49433a));
+    add(
+      this.add
+        .rectangle(752, 280, 360, 448, 0x111214, 0.98)
+        .setStrokeStyle(1, 0x49433a),
+    );
     add(
       this.add.text(598, 76, "ATUALIZAÇÕES", {
         fontFamily: "Arial",
@@ -1116,10 +1246,16 @@ class AsylumScene extends Phaser.Scene {
     );
 
     const updates = [
-      ["MAPA AMPLIADO", "Novas alas a leste e ao sul, com uma saída mais distante."],
+      [
+        "MAPA AMPLIADO",
+        "Novas alas a leste e ao sul, com uma saída mais distante.",
+      ],
       ["VENTILAÇÃO", "O ar também diminui durante a travessia entre dutos."],
       ["HOTBAR", "As chaves aparecem nos primeiros espaços da barra."],
-      ["LUZ E CENÁRIO", "Alcance da lanterna ajustado; personagem à frente dos objetos."],
+      [
+        "LUZ E CENÁRIO",
+        "Alcance da lanterna ajustado; personagem à frente dos objetos.",
+      ],
     ];
 
     updates.forEach(([title, description], index) => {
@@ -1327,6 +1463,8 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla E: sair da ventilacao, entrar numa ou usar uma porta
   onInteract() {
+    // Digitando no console de debug: nao interage com o jogo.
+    if (this.debugCommandFocused) return;
     if (this.gameOver || !this.gameStarted) return;
 
     if (this.ventState === "hidden") {
@@ -1348,6 +1486,8 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla ESPACO: rastejar ate a outra ponta
   onSpacePressed() {
+    // Digitando no console de debug: nao interage com o jogo.
+    if (this.debugCommandFocused) return;
     if (this.gameOver) return;
 
     if (!this.gameStarted) {
@@ -1362,7 +1502,8 @@ class AsylumScene extends Phaser.Scene {
   }
 
   onCrawlKey() {
-    if (this.gameOver || !this.gameStarted || this.ventState !== "hidden") return;
+    if (this.gameOver || !this.gameStarted || this.ventState !== "hidden")
+      return;
 
     this.crawlVent();
   }
@@ -1394,9 +1535,15 @@ class AsylumScene extends Phaser.Scene {
     }
 
     // ela te viu entrar? (confere antes de sumir)
+    const tune = this.adaptiveTuning;
     const saw =
-      this.nunCanSee(430) ||
-      (this.nunState === "chase" && now - this.nunLastSeenAt < 1400);
+      this.nunCanSee(
+        tune.visionRange + (this.playerRunning ? tune.runningVisionBonus : 0),
+      ) ||
+      (this.nunState === "chase" &&
+        now - this.nunLastSeenAt < tune.chaseMemoryMs);
+    this.ventEscapePending =
+      this.nunState === "chase" || this.nunState === "ventHunt";
 
     this.ventState = "hidden";
     this.ventAt = vent;
@@ -1412,14 +1559,14 @@ class AsylumScene extends Phaser.Scene {
         stage: "toEntry",
         entry: vent,
         target: { x: vent.x, y: vent.y },
-        expireAt: now + 40000,
+        expireAt: now + tune.ventHuntMs,
       };
 
       this.setNunState("ventHunt");
       this.nunRepathAt = 0;
       this.say("A freira viu você entrar na ventilação!", 3500);
       this.cameras.main.shake(180, 0.005);
-    } else if (this.makeNoise(vent.x, vent.y, 320)) {
+    } else if (this.makeNoise(vent.x, vent.y, tune.hearingRange)) {
       this.say("A ventilação rangeu... a freira ouviu!", 3000);
     } else {
       this.say("Você entrou na ventilação.", 2500);
@@ -1445,6 +1592,11 @@ class AsylumScene extends Phaser.Scene {
         this.crawlTween = null;
         this.ventState = "hidden";
         this.ventAt = to;
+        if (this.ventEscapePending) {
+          this.difficultyEscapes++;
+          this.changeDifficulty(ENEMY_DIFFICULTY.escapeGain);
+          this.ventEscapePending = false;
+        }
         this.say("Você chegou na outra ventilação.", 2500);
       },
     });
@@ -1773,11 +1925,7 @@ class AsylumScene extends Phaser.Scene {
       if (!this.chaseMusic.isPlaying) this.chaseMusic.play();
     } else {
       if (this.chaseMusic.isPlaying) this.chaseMusic.stop();
-      if (
-        this.gameStarted &&
-        !this.gameOver &&
-        !this.ambientMusic.isPlaying
-      ) {
+      if (this.gameStarted && !this.gameOver && !this.ambientMusic.isPlaying) {
         if (this.ambientMusic.isPaused) this.ambientMusic.resume();
         else this.ambientMusic.play();
       }
@@ -1791,17 +1939,54 @@ class AsylumScene extends Phaser.Scene {
 
   // calcula o caminho ate o destino
   setNunDestination(x, y) {
+    // Ajusta o destino para o centro da celula livre mais proxima.
+    // Assim o A* sempre termina exatamente no destino e nunArrived() funciona,
+    // mesmo quando o ponto original cai numa celula bloqueada (perto de parede/movel).
+    const snapped = this.nav.nearestFree(x, y);
+    if (snapped) {
+      const c = this.nav.center(snapped.cx, snapped.cy);
+      x = c.x;
+      y = c.y;
+    }
+
     this.nunDest = { x, y };
+    const usePath = (this.pathfindingBlend || 0) > 0.01;
+    let path = usePath ? this.nav.findPath(this.nun.x, this.nun.y, x, y) : null;
 
-    const path = this.nav.findPath(this.nun.x, this.nun.y, x, y);
+    // Fallback A*: procura uma celula alcancavel mais proxima do destino.
+    if (usePath && !path) {
+      const reachable = this.nav.reachable(this.nun.x, this.nun.y);
+      let closest = null;
+      let closestDistance = Infinity;
+      if (reachable) {
+        for (let cy = 0; cy < this.nav.rows; cy++) {
+          for (let cx = 0; cx < this.nav.cols; cx++) {
+            if (!reachable[cy * this.nav.cols + cx]) continue;
+            const point = this.nav.center(cx, cy);
+            const distance = Phaser.Math.Distance.Between(
+              point.x,
+              point.y,
+              x,
+              y,
+            );
+            if (distance < closestDistance) {
+              closestDistance = distance;
+              closest = point;
+            }
+          }
+        }
+      }
+      if (closest)
+        path = this.nav.findPath(this.nun.x, this.nun.y, closest.x, closest.y);
+    }
 
-    this.nunPathFailed = !path;
+    this.nunPathFailed = usePath && !path;
     this.nunPath = path || [];
   }
 
   nunArrived() {
     if (this.nunPath.length > 0) return false;
-    if (!this.nunPathFailed || !this.nunDest) return true;
+    if (!this.nunDest) return true;
 
     return (
       Phaser.Math.Distance.Between(
@@ -1818,11 +2003,20 @@ class AsylumScene extends Phaser.Scene {
     this.nunMoving = false;
   }
 
-  // segue o caminho; se nao ha caminho, vai direto ao destino
+  // Segue A* quando habilitado; dificuldade baixa usa deslocamento direto.
   moveNun(speed, directTarget = null) {
     let target = directTarget;
 
     if (!target) {
+      if (
+        this.pathfindingBlend >= 0.99 &&
+        this.nunPath.length === 0 &&
+        !this.nunPathFailed &&
+        this.nunDest
+      ) {
+        this.setNunDestination(this.nunDest.x, this.nunDest.y);
+      }
+
       while (
         this.nunPath.length &&
         Phaser.Math.Distance.Between(
@@ -1838,7 +2032,7 @@ class AsylumScene extends Phaser.Scene {
       if (this.nunPath.length) {
         target = this.nunPath[0];
       } else if (
-        this.nunPathFailed &&
+        (this.nunPathFailed || this.pathfindingBlend < 0.99) &&
         this.nunDest &&
         Phaser.Math.Distance.Between(
           this.nun.x,
@@ -1867,6 +2061,213 @@ class AsylumScene extends Phaser.Scene {
     this.nunMoving = true;
   }
 
+  moveNunAdaptive(speed, target) {
+    const blend = this.pathfindingBlend || 0;
+    if (blend <= 0.01) {
+      this.moveNun(speed, target);
+      return;
+    }
+
+    while (
+      this.nunPath.length > 1 &&
+      Phaser.Math.Distance.Between(
+        this.nun.x,
+        this.nun.y,
+        this.nunPath[0].x,
+        this.nunPath[0].y,
+      ) < 12
+    ) {
+      this.nunPath.shift();
+    }
+
+    const waypoint = this.nunPath[0] || target;
+    const directAngle = Phaser.Math.Angle.Between(
+      this.nun.x,
+      this.nun.y,
+      target.x,
+      target.y,
+    );
+    const pathAngle = Phaser.Math.Angle.Between(
+      this.nun.x,
+      this.nun.y,
+      waypoint.x,
+      waypoint.y,
+    );
+    const vx =
+      Math.cos(directAngle) * (1 - blend) + Math.cos(pathAngle) * blend;
+    const vy =
+      Math.sin(directAngle) * (1 - blend) + Math.sin(pathAngle) * blend;
+    const length = Math.hypot(vx, vy) || 1;
+    this.nun.body.setVelocity((vx / length) * speed, (vy / length) * speed);
+    this.nunMoving = true;
+  }
+
+  difficultyFactor() {
+    const { min, max } = ENEMY_DIFFICULTY;
+    return Phaser.Math.Clamp((this.difficulty - min) / (max - min), 0, 1);
+  }
+
+  changeDifficulty(amount) {
+    this.difficulty = Phaser.Math.Clamp(
+      this.difficulty + amount,
+      ENEMY_DIFFICULTY.min,
+      ENEMY_DIFFICULTY.max,
+    );
+  }
+
+  updateDifficulty(now, dt) {
+    this.difficultyPlaySeconds += dt;
+    if (now < this.difficultyNextUpdate) return;
+    this.difficultyNextUpdate = now + ENEMY_DIFFICULTY.adaptIntervalMs;
+    this.changeDifficulty(ENEMY_DIFFICULTY.survivalGainPerMinute / 60);
+    this.refreshDifficultyTuning();
+  }
+
+  refreshDifficultyTuning() {
+    const cfg = ENEMY_DIFFICULTY.values;
+    const f = this.difficultyFactor();
+    const value = (range) => Phaser.Math.Linear(range[0], range[1], f);
+    this.adaptiveTuning = {
+      wanderSpeed: value(cfg.wanderSpeed),
+      investigateSpeed: value(cfg.investigateSpeed),
+      chaseSpeed: value(cfg.chaseSpeed),
+      chaseSpeedWithKeyBonus: value(cfg.chaseSpeedWithKeyBonus),
+      visionRange: value(cfg.visionRange),
+      runningVisionBonus: value(cfg.runningVisionBonus),
+      hearingRange: value(cfg.hearingRange),
+      closeSense: value(cfg.closeSense),
+      chaseMemoryMs: value(cfg.chaseMemoryMs),
+      ventHuntMs: value(cfg.ventHuntMs),
+      searchDurationMs: value(cfg.searchDurationMs),
+      patrolWaitMs: value(cfg.patrolWaitMs),
+      repathMs: value(cfg.repathMs),
+    };
+    const threshold = ENEMY_DIFFICULTY.pathfindingThreshold;
+    const halfBlend = ENEMY_DIFFICULTY.pathfindingBlendRange / 2;
+    this.pathfindingBlend = Phaser.Math.Clamp(
+      (this.difficulty - (threshold - halfBlend)) / (halfBlend * 2),
+      0,
+      1,
+    );
+  }
+
+  updateDebugCommandBar() {
+    if (!this.enemyDebugCommandBar) return;
+    this.enemyDebugCommandBar.setText(
+      `> ${this.debugCommand}\n${this.debugCommandMessage}`,
+    );
+  }
+
+  handleDebugCommandKey(event) {
+    if (!this.debugEnemyAI || !this.debugCommandFocused || event.code === "F3")
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.key === "Enter") {
+      const command = this.debugCommand.trim();
+      const match = command.match(
+        /^(?:difficulty|d)\s+([0-9]+(?:\.[0-9]+)?)$/i,
+      );
+      if (match) {
+        const value = Number(match[1]);
+        if (value >= ENEMY_DIFFICULTY.min && value <= ENEMY_DIFFICULTY.max) {
+          this.difficulty = value;
+          this.refreshDifficultyTuning();
+          this.registry.set("enemyDifficulty", value);
+          this.nunRepathAt = 0;
+          if (this.nunDest)
+            this.setNunDestination(this.nunDest.x, this.nunDest.y);
+          this.debugCommandMessage = `Dificuldade definida: ${value.toFixed(1)}`;
+        } else {
+          this.debugCommandMessage = `Use um valor entre ${ENEMY_DIFFICULTY.min} e ${ENEMY_DIFFICULTY.max}.`;
+        }
+      } else if (/^(?:help|\?)$/i.test(command)) {
+        this.debugCommandMessage = "Comando: difficulty 0-10 (ou d 5)";
+      } else {
+        this.debugCommandMessage = "Comando invalido. Use: difficulty 0-10";
+      }
+      this.debugCommand = "";
+      this.updateDebugCommandBar();
+      return;
+    }
+
+    if (event.key === "Backspace") {
+      this.debugCommand = this.debugCommand.slice(0, -1);
+    } else if (event.key === "Escape") {
+      this.debugCommand = "";
+      this.debugCommandMessage =
+        "Console ativo. Enter executa; clique fora para sair.";
+    } else if (event.key.length === 1 && /^[a-z0-9 ._-]$/i.test(event.key)) {
+      this.debugCommand += event.key;
+    }
+    this.updateDebugCommandBar();
+  }
+
+  drawEnemyDebug(now) {
+    if (now < this.debugDrawAt) return;
+    this.debugDrawAt = now + ENEMY_DIFFICULTY.debugRefreshMs;
+    const g = this.enemyDebugGrid;
+    const cam = this.cameras.main;
+    const size = this.nav.cellSize;
+    const left = Math.max(0, Math.floor(cam.scrollX / size));
+    const top = Math.max(0, Math.floor(cam.scrollY / size));
+    const right = Math.min(
+      this.nav.cols - 1,
+      Math.ceil((cam.scrollX + cam.width / cam.zoom) / size),
+    );
+    const bottom = Math.min(
+      this.nav.rows - 1,
+      Math.ceil((cam.scrollY + cam.height / cam.zoom) / size),
+    );
+
+    g.clear();
+    g.lineStyle(1, 0x9fc69f, 0.12);
+    for (let cx = left; cx <= right; cx++) {
+      const x = cx * size;
+      g.lineBetween(x, top * size, x, (bottom + 1) * size);
+    }
+    for (let cy = top; cy <= bottom; cy++) {
+      const y = cy * size;
+      g.lineBetween(left * size, y, (right + 1) * size, y);
+    }
+    g.fillStyle(0xff3b3b, 0.22);
+    for (let cy = top; cy <= bottom; cy++) {
+      for (let cx = left; cx <= right; cx++) {
+        if (!this.nav.isFree(cx, cy)) {
+          g.fillRect(cx * size + 1, cy * size + 1, size - 2, size - 2);
+        }
+      }
+    }
+
+    if (this.nunPath.length) {
+      g.lineStyle(4, 0xffcf4a, 0.9);
+      g.beginPath();
+      g.moveTo(this.nun.x, this.nun.y);
+      for (const point of this.nunPath) g.lineTo(point.x, point.y);
+      g.strokePath();
+      g.fillStyle(0xffcf4a, 1);
+      for (const point of this.nunPath) g.fillCircle(point.x, point.y, 5);
+    } else if (this.nunDest) {
+      g.lineStyle(3, 0xffcf4a, 0.75);
+      g.lineBetween(this.nun.x, this.nun.y, this.nunDest.x, this.nunDest.y);
+      g.fillStyle(0xffcf4a, 1);
+      g.fillCircle(this.nunDest.x, this.nunDest.y, 6);
+    }
+
+    const tune = this.adaptiveTuning;
+    this.enemyDebugPanel.setText([
+      `DEBUG IA  [F3]`,
+      `Dificuldade: ${this.difficulty.toFixed(2)} / ${ENEMY_DIFFICULTY.max}`,
+      `Freira: ${this.nunState} | A*: ${Math.round(this.pathfindingBlend * 100)}%`,
+      `Caminho: ${this.nunPath.length}${this.nunPathFailed ? " (fallback)" : ""}`,
+      `Visao: ${Math.round(tune?.visionRange ?? 330)} | Audicao: ${Math.round(tune?.hearingRange ?? 380)}`,
+      `Perseg.: ${Math.round(tune?.chaseMemoryMs ?? 1400)}ms | Recalculo: ${Math.round(tune?.repathMs ?? 250)}ms`,
+      `Sobreviveu: ${Math.floor(this.difficultyPlaySeconds)}s | Itens: ${this.difficultyItems} | Fugas: ${this.difficultyEscapes}`,
+      `Quase pega: ${this.difficultyNearMisses} | Capturas: ${this.difficultyCatches}`,
+    ]);
+  }
+
   // a freira enxerga: alcance, cone de visao (ou muito perto) e linha de visao livre
   nunCanSee(visionRange) {
     // escondido ou rastejando na ventilacao: ninguem te ve
@@ -1892,44 +2293,17 @@ class AsylumScene extends Phaser.Scene {
   // escolhe um ponto de patrulha alcancavel (as vezes perto do jogador)
   pickPatrolTarget() {
     const visited = this.nav.reachable(this.nun.x, this.nun.y);
-
     if (!visited) return;
-
-    const far = [];
-    const nearPlayer = [];
-
-    for (let cy = 0; cy < this.nav.rows; cy++) {
-      for (let cx = 0; cx < this.nav.cols; cx++) {
-        if (!visited[cy * this.nav.cols + cx]) continue;
-
-        const c = this.nav.center(cx, cy);
-
-        if (
-          Phaser.Math.Distance.Between(c.x, c.y, this.nun.x, this.nun.y) < 250
-        ) {
-          continue;
-        }
-
-        far.push(c);
-
-        if (
-          Phaser.Math.Distance.Between(c.x, c.y, this.player.x, this.player.y) <
-          520
-        ) {
-          nearPlayer.push(c);
-        }
-      }
-    }
-
-    const pool =
-      nearPlayer.length && Math.random() < 0.35
-        ? nearPlayer
-        : far.length
-          ? far
-          : null;
-
-    if (!pool) return;
-
+    const pool = ENEMY_DIFFICULTY.patrolPoints.filter((point) => {
+      const { cx, cy } = this.nav.toCell(point.x, point.y);
+      return (
+        this.nav.isReached(visited, point.x, point.y) &&
+        Phaser.Math.Distance.Between(point.x, point.y, this.nun.x, this.nun.y) >
+          220 &&
+        this.nav.isFree(cx, cy)
+      );
+    });
+    if (!pool.length) return;
     const target = Phaser.Utils.Array.GetRandom(pool);
 
     this.setNunDestination(target.x, target.y);
@@ -1963,6 +2337,13 @@ class AsylumScene extends Phaser.Scene {
   }
 
   updateNun(now, delta) {
+    this.updateDifficulty(now, delta / 1000);
+    const tune = this.adaptiveTuning;
+    this.nunWanderSpeed = tune.wanderSpeed;
+    this.nunInvestigateSpeed = tune.investigateSpeed;
+    this.nunChaseSpeed =
+      tune.chaseSpeed + (this.hasKey ? tune.chaseSpeedWithKeyBonus : 0);
+    this.nunCloseSense = tune.closeSense;
     const nun = this.nun;
     const px = this.player.x;
     const py = this.player.y;
@@ -1980,13 +2361,20 @@ class AsylumScene extends Phaser.Scene {
     }
 
     // PERCEPCAO
-    const visionRange = this.playerRunning ? 430 : 330;
+    const visionRange =
+      tune.visionRange + (this.playerRunning ? tune.runningVisionBonus : 0);
     const seesPlayer = this.nunCanSee(visionRange);
     const heardPlayer =
-      this.playerRunning && this.ventState === "none" && dist <= 380;
+      this.playerRunning &&
+      this.ventState === "none" &&
+      dist <= tune.hearingRange;
 
     if (seesPlayer) {
-      if (this.nunState !== "chase") this.onNunSpotted();
+      if (this.nunState !== "chase") {
+        this.onNunSpotted();
+        this.nunChaseStartedAt = now;
+        this.nunNearMissCounted = false;
+      }
 
       this.nunHunt = null;
       this.setNunState("chase");
@@ -1994,7 +2382,16 @@ class AsylumScene extends Phaser.Scene {
       this.nunLastSeenAt = now;
     } else if (this.nunState === "chase") {
       // perdeu o jogador de vista: vai ate onde viu por ultimo e procura
-      if (now - this.nunLastSeenAt > 1400) {
+      if (now - this.nunLastSeenAt > tune.chaseMemoryMs) {
+        this.difficultyEscapes++;
+        this.changeDifficulty(ENEMY_DIFFICULTY.escapeGain);
+        if (
+          !this.nunNearMissCounted &&
+          now - this.nunChaseStartedAt >= ENEMY_DIFFICULTY.chaseEndNearMissMs
+        ) {
+          this.difficultyNearMisses++;
+          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
+        }
         this.setNunState("search");
         this.nunSearchUntil = 0;
         this.setNunDestination(this.nunLastSeen.x, this.nunLastSeen.y);
@@ -2011,12 +2408,20 @@ class AsylumScene extends Phaser.Scene {
 
         if (now >= this.nunRepathAt) {
           this.setNunDestination(target.x, target.y);
-          this.nunRepathAt = now + 250;
+          this.nunRepathAt = now + tune.repathMs;
         }
 
-        const direct = seesPlayer && dist < 110;
-
-        this.moveNun(this.nunChaseSpeed, direct ? target : null);
+        if (
+          this.nunState === "chase" &&
+          seesPlayer &&
+          dist <= ENEMY_DIFFICULTY.nearMissDistance &&
+          !this.nunNearMissCounted
+        ) {
+          this.nunNearMissCounted = true;
+          this.difficultyNearMisses++;
+          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
+        }
+        this.moveNunAdaptive(this.nunChaseSpeed, target);
         break;
       }
 
@@ -2033,7 +2438,7 @@ class AsylumScene extends Phaser.Scene {
 
         if (now >= this.nunRepathAt) {
           this.setNunDestination(h.target.x, h.target.y);
-          this.nunRepathAt = now + 400;
+          this.nunRepathAt = now + tune.repathMs;
         }
 
         this.moveNun(this.nunChaseSpeed);
@@ -2072,8 +2477,8 @@ class AsylumScene extends Phaser.Scene {
             // chegou na saida: fica ali parada, de olho
             this.nunHunt = null;
             this.setNunState("search");
-            this.nunWaitUntil = now + 4500;
-            this.nunSearchUntil = now + 8000;
+            this.nunWaitUntil = now + tune.patrolWaitMs;
+            this.nunSearchUntil = now + tune.searchDurationMs;
             this.nunDest = null;
             this.stopNun();
           }
@@ -2086,8 +2491,8 @@ class AsylumScene extends Phaser.Scene {
 
         if (this.nunArrived()) {
           this.setNunState("search");
-          this.nunSearchUntil = now + 4500;
-          this.nunWaitUntil = now + 700;
+          this.nunSearchUntil = now + tune.searchDurationMs;
+          this.nunWaitUntil = now + tune.patrolWaitMs * 0.35;
           this.nunDest = null;
         }
         break;
@@ -2099,8 +2504,8 @@ class AsylumScene extends Phaser.Scene {
           this.moveNun(this.nunInvestigateSpeed);
 
           if (this.nunArrived()) {
-            this.nunSearchUntil = now + 4500;
-            this.nunWaitUntil = now + 700;
+            this.nunSearchUntil = now + tune.searchDurationMs;
+            this.nunWaitUntil = now + tune.patrolWaitMs * 0.35;
             this.nunDest = null;
           }
         } else if (now > this.nunSearchUntil) {
@@ -2114,7 +2519,9 @@ class AsylumScene extends Phaser.Scene {
           if (!this.nunDest || this.nunArrived()) {
             if (this.nunDest) {
               this.nunDest = null;
-              this.nunWaitUntil = now + Phaser.Math.Between(500, 1100);
+              const wait = tune.patrolWaitMs;
+              this.nunWaitUntil =
+                now + wait * Phaser.Math.FloatBetween(0.65, 1.35);
               this.stopNun();
               break;
             }
@@ -2138,7 +2545,8 @@ class AsylumScene extends Phaser.Scene {
           this.pickPatrolTarget();
         } else if (this.nunArrived()) {
           this.nunDest = null;
-          this.nunWaitUntil = now + Phaser.Math.Between(900, 2200);
+          const wait = tune.patrolWaitMs;
+          this.nunWaitUntil = now + wait * Phaser.Math.FloatBetween(0.65, 1.35);
           this.stopNun();
           break;
         }
@@ -2203,6 +2611,12 @@ class AsylumScene extends Phaser.Scene {
     if (k.W.isDown || k.UP.isDown) dy--;
     if (k.S.isDown || k.DOWN.isDown) dy++;
 
+    // Ao digitar no console de debug, mantem a personagem parada.
+    if (this.debugEnemyAI && this.debugCommandFocused) {
+      dx = 0;
+      dy = 0;
+    }
+
     // dentro da ventilacao o jogador nao anda
     if (this.ventState !== "none") {
       dx = 0;
@@ -2238,9 +2652,7 @@ class AsylumScene extends Phaser.Scene {
     }
 
     // Os sprites idle estao nomeados ao contrario da orientacao que mostram.
-    const facingLeft = moving
-      ? dx < 0
-      : Math.cos(this.playerFacingAngle) > 0;
+    const facingLeft = moving ? dx < 0 : Math.cos(this.playerFacingAngle) > 0;
     const direction = facingLeft ? "left" : "right";
     const animation = moving
       ? `mila-${running ? "run" : "walk"}-${direction}`
@@ -2288,6 +2700,7 @@ class AsylumScene extends Phaser.Scene {
 
     // FREIRA
     this.updateNun(time, delta);
+    if (this.debugEnemyAI) this.drawEnemyDebug(time);
 
     // MEDO: quanto mais perto a freira, mais o coracao bate e a luz falha
     const nunDist = Phaser.Math.Distance.Between(
@@ -2315,6 +2728,13 @@ class AsylumScene extends Phaser.Scene {
   // FINAL DO JOGO
   finish(won, message) {
     if (this.gameOver) return;
+
+    if (!won) {
+      this.difficultyCatches++;
+      this.changeDifficulty(-ENEMY_DIFFICULTY.caughtLoss);
+    }
+    // Salva a dificuldade tanto na vitoria quanto na derrota.
+    this.registry.set("enemyDifficulty", this.difficulty);
 
     this.gameOver = true;
 
