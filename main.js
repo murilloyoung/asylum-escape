@@ -1,3 +1,8 @@
+import { generateMapLayout, buildMap } from "./map.js";
+import { installNunMethods } from "./nun.js";
+import { installCatMethods, CAT_AI_DIFFICULTY } from "./cat.js";
+import { installPlayerMethods } from "./player.js";
+
 // ==== NAV START ====
 // GRADE DE NAVEGACAO (sem dependencia do Phaser)
 
@@ -70,11 +75,6 @@ const NAV_DIRS = [
   [-1, 1],
   [-1, -1],
 ];
-
-// Os gatos usam sempre a precisao de pathfinding do nivel maximo.
-const CAT_AI_DIFFICULTY = 10;
-const CAT_REPATH_INTERVAL = 250;
-const CAT_AUDIBLE_RADIUS = 160;
 
 class NavGrid {
   // solids: [{left, right, top, bottom}] — inflate: margem de folga do corpo
@@ -327,6 +327,7 @@ const ENEMY_DIFFICULTY = {
   start: 2,
   adaptIntervalMs: 1000,
   survivalGainPerMinute: 0.45,
+  followCatMultiplier: 1.5,
   itemGain: 0.25,
   escapeGain: 0.45,
   caughtLoss: 1.25,
@@ -441,6 +442,7 @@ class AsylumScene extends Phaser.Scene {
   create() {
     this.gameOver = false;
     this.gameStarted = false;
+    this.godMode = false;
     this.footstepSound = this.sound.add("passos", { loop: true, volume: 0.3 });
     this.runningSound = this.sound.add("corrida", { loop: true, volume: 0.35 });
     this.screamSound = this.sound.add("gritoFreira", { volume: 0.65 });
@@ -452,9 +454,11 @@ class AsylumScene extends Phaser.Scene {
     this.catAngrySound = this.sound.add("catAngry", { volume: 0.25 });
     this.catScratchSound = this.sound.add("catScratch", { volume: 0.18 });
     this.catSoundCooldown = 0;
+    this.cats = []; // sempre reiniciado: um unico gato e criado por partida
 
-    this.mapWidth = 2400;
-    this.mapHeight = 1600;
+    this.mapLayout = generateMapLayout();
+    this.mapWidth = this.mapLayout.width;
+    this.mapHeight = this.mapLayout.height;
     this.worldDepth = (y) =>
       1 + (50 * Phaser.Math.Clamp(y, 0, this.mapHeight)) / this.mapHeight;
     this.characterDepth = 80;
@@ -481,13 +485,9 @@ class AsylumScene extends Phaser.Scene {
     this.playerFacingAngle = 0;
     this.lastPointerMoveAt = -10000;
 
-    // FREIRA
-    this.nunState = "patrol"; // patrol | investigate | chase | search
-    this.nunWanderSpeed = 68;
-    this.nunInvestigateSpeed = 95;
-    this.nunChaseSpeed = 120;
-    this.nunChaseSpeedWithKey = 152;
-    this.nunFov = 1.1; // meio angulo de visao (rad)
+    // FREIRA (velocidades, visao e audicao vem de adaptiveTuning)
+    this.nunState = "patrol"; // patrol | investigate | chase | search | ventHunt
+    this.nunFov = ENEMY_DIFFICULTY.visionHalfAngle; // meio angulo de visao (rad)
     this.nunCloseSense = 120; // percebe o jogador perto, mesmo de costas
     this.nunFacing = Math.PI;
     this.nunDest = null;
@@ -513,6 +513,7 @@ class AsylumScene extends Phaser.Scene {
     this.difficultyEscapes = 0;
     this.difficultyCatches = 0;
     this.difficultyNearMisses = 0;
+    this.difficultyFollowMultiplier = 1;
     this.nunChaseStartedAt = 0;
     this.nunNearMissCounted = false;
     this.pathfindingBlend = 0;
@@ -542,427 +543,7 @@ class AsylumScene extends Phaser.Scene {
     this.lightDipUntil = 0;
     this.statusUntil = 0;
 
-    this.physics.world.setBounds(0, 0, this.mapWidth, this.mapHeight);
-
-    // PISO MONTADO COM OS QUATRO AZULEJOS LIMPOS DO TILESET.
-    this.add
-      .tileSprite(
-        this.mapWidth / 2,
-        this.mapHeight / 2,
-        this.mapWidth,
-        this.mapHeight,
-        "insideTiles",
-        "floor",
-      )
-      .setDepth(0);
-    for (const [x, y] of [
-      [780, 690],
-      [1390, 690],
-      [280, 1040],
-      [1540, 1030],
-    ]) {
-      this.add.image(x, y, "insideTiles", "bloodFloor").setDepth(1);
-    }
-
-    // VENTILACOES: sem fisica, o jogador passa por cima.
-    // Criadas antes do jogador e da freira (mesmo depth), entao ficam desenhadas abaixo deles.
-    this.createVentTexture();
-    this.vents = [];
-
-    VENT_PAIRS.forEach((pair, index) => {
-      pair.forEach((p, side) => {
-        const img = this.add
-          .image(p.x, p.y, "ventilacao")
-          .setDepth(this.worldDepth(p.y));
-
-        this.vents.push({ pair: index, side, x: p.x, y: p.y, img });
-      });
-    });
-
-    // PAREDES
-    this.walls = [];
-    this.wallRects = [];
-
-    const addWall = (x, y, w, h) => {
-      const wall = this.add.tileSprite(x, y, w, h, "insideTiles", "wall");
-      wall.setDepth(this.worldDepth(y + h / 2));
-
-      this.physics.add.existing(wall, true);
-      this.walls.push(wall);
-      this.wallRects.push({
-        left: x - w / 2,
-        right: x + w / 2,
-        top: y - h / 2,
-        bottom: y + h / 2,
-      });
-
-      return wall;
-    };
-
-    // PAREDES EXTERNAS
-    addWall(this.mapWidth / 2, 10, this.mapWidth, 20);
-    addWall(this.mapWidth / 2, this.mapHeight - 10, this.mapWidth, 20);
-    addWall(10, this.mapHeight / 2, 20, this.mapHeight);
-    addWall(this.mapWidth - 10, this.mapHeight / 2, 20, this.mapHeight);
-
-    // PAREDES VERTICAIS
-    for (const x of [500, 900, 1300]) {
-      addWall(x, 330, 24, 300);
-      addWall(x, 890, 24, 380);
-    }
-
-    // Ala leste conectada ao restante do asilo pelo corredor central.
-    addWall(1900, 330, 24, 300);
-    addWall(1900, 890, 24, 380);
-
-    // PAREDES HORIZONTAIS
-    addWall(250, 400, 400, 24);
-    addWall(750, 400, 300, 24);
-    addWall(1150, 400, 300, 24);
-
-    addWall(250, 850, 400, 24);
-    addWall(750, 850, 300, 24);
-    addWall(1150, 850, 300, 24);
-
-    // DIVISOES DA ALA SUL: salas menores com passagens entre elas.
-    addWall(350, 1220, 620, 24);
-    addWall(1150, 1220, 500, 24);
-    addWall(350, 1270, 24, 100);
-    addWall(350, 1490, 24, 180);
-    addWall(900, 1250, 24, 60);
-    addWall(900, 1490, 24, 180);
-    addWall(1500, 1250, 24, 60);
-    addWall(1500, 1490, 24, 180);
-    addWall(1850, 1220, 100, 24);
-
-    // ANIMACOES DA MILA: os arquivos sao folhas horizontais de quadros 32x32.
-    for (const [key, texture, frames, rate] of [
-      ["mila-idle-left", "milaIdleLeft", 4, 4],
-      ["mila-idle-right", "milaIdleRight", 4, 4],
-      ["mila-walk-left", "milaWalkLeft", 6, 8],
-      ["mila-walk-right", "milaWalkRight", 6, 8],
-      ["mila-run-left", "milaRunLeft", 6, 12],
-      ["mila-run-right", "milaRunRight", 6, 12],
-    ]) {
-      if (this.anims.exists(key)) continue;
-      this.anims.create({
-        key,
-        frames: this.anims.generateFrameNumbers(texture, {
-          start: 0,
-          end: frames - 1,
-        }),
-        frameRate: rate,
-        repeat: -1,
-      });
-    }
-
-    // JOGADOR
-    this.player = this.add.container(110, 250);
-    this.player.setDepth(this.characterDepth);
-    this.playerSprite = this.add
-      .sprite(0, 0, "milaIdleRight")
-      .setOrigin(0.5, 0.5)
-      .setScale(1.5);
-    this.player.add(this.playerSprite);
-
-    this.physics.add.existing(this.player);
-    this.player.body.setSize(22, 30);
-    this.player.body.setOffset(-11, -15);
-    this.player.body.setCollideWorldBounds(true);
-
-    // VILA (FREIRA): sprite sheet com quadros 32x36.
-    this.nun = this.add.container(1550, 1000);
-    this.nun.setDepth(this.characterDepth);
-    this.nunSprite = this.add.sprite(0, 0, "freira", 0).setScale(1.5);
-    this.nun.add(this.nunSprite);
-
-    this.physics.add.existing(this.nun);
-    this.nun.body.setSize(26, 38);
-    this.nun.body.setOffset(-13, -19);
-    this.nun.body.setCollideWorldBounds(true);
-    this.nun.body.setMaxVelocity(220, 220);
-
-    // Moveis e caixas distribuidos pelas alas, usando recortes do tileset.
-    // As novas pecas tambem bloqueiam a passagem e entram na navegacao da freira.
-    this.furnitureRects = [];
-    this.furniture = [];
-    for (const [x, y, frame] of [
-      [180, 315, "bedA"],
-      [640, 315, "bedB"],
-      [1060, 315, "bedA"],
-      [1480, 315, "bedB"],
-      [1740, 315, "bedA"],
-      [370, 700, "locker"],
-      [820, 700, "locker"],
-      [1240, 700, "locker"],
-      [1660, 700, "locker"],
-      [330, 1040, "crateA"],
-      [760, 1040, "crateB"],
-      [1160, 1040, "crateA"],
-      [1460, 1120, "crateB"],
-      [2050, 1080, "crateA"],
-      [2080, 315, "bedA"],
-      [2230, 720, "locker"],
-      [1840, 1370, "crateB"],
-      [2160, 1370, "crateA"],
-    ]) {
-      const furniture = this.add.image(x, y, "insideTiles", frame);
-      furniture.setDepth(this.worldDepth(y + furniture.displayHeight / 2));
-      this.physics.add.existing(furniture, true);
-      this.physics.add.collider(this.player, furniture);
-      this.physics.add.collider(this.nun, furniture);
-      this.furniture.push(furniture);
-      this.furnitureRects.push({
-        left: x - furniture.displayWidth / 2,
-        right: x + furniture.displayWidth / 2,
-        top: y - furniture.displayHeight / 2,
-        bottom: y + furniture.displayHeight / 2,
-      });
-    }
-
-    // COLISOES DAS PAREDES
-    for (const wall of this.walls) {
-      this.physics.add.collider(this.player, wall);
-      this.physics.add.collider(this.nun, wall);
-    }
-
-    // PORTAS
-    this.doors = [];
-
-    const addDoor = (x, y, w, h, locked = false) => {
-      const horizontal = w > h;
-
-      // Porta normal: madeira. Porta trancada: vermelho escuro.
-      const door = this.add.rectangle(x, y, w, h, locked ? 0x792e32 : 0x966033);
-
-      door.setStrokeStyle(4, locked ? 0xff5555 : 0xf0c778);
-      door.setDepth(this.worldDepth(y + h / 2));
-
-      this.physics.add.existing(door, true);
-
-      door.isLocked = locked;
-      door.isOpen = false;
-      door.decorations = [];
-      door.lockIcon = null;
-      door.rect = {
-        left: x - w / 2,
-        right: x + w / 2,
-        top: y - h / 2,
-        bottom: y + h / 2,
-      };
-
-      const addDetail = (obj, depth = door.depth + 0.01) => {
-        obj.setDepth(depth);
-        door.decorations.push(obj);
-        return obj;
-      };
-
-      // MOLDURA INTERNA
-      addDetail(
-        this.add
-          .rectangle(
-            x,
-            y,
-            Math.max(4, w - 12),
-            Math.max(4, h - 12),
-            0x000000,
-            0,
-          )
-          .setStrokeStyle(2, 0xd9ad6b),
-      );
-
-      // TABUAS DA MADEIRA
-      if (horizontal) {
-        for (const offset of [-5, 5]) {
-          addDetail(
-            this.add.rectangle(x, y + offset, Math.max(2, w - 16), 2, 0x402719),
-          );
-        }
-      } else {
-        for (const offset of [-5, 5]) {
-          addDetail(
-            this.add.rectangle(x + offset, y, 2, Math.max(2, h - 16), 0x402719),
-          );
-        }
-      }
-
-      // MACANETA
-      const handleX = horizontal ? x + w * 0.32 : x + 6;
-      const handleY = horizontal ? y + 5 : y + h * 0.25;
-
-      addDetail(this.add.circle(handleX, handleY, 4, 0xffdf80));
-
-      // CADEADO NAS PORTAS TRANCADAS
-      if (locked) {
-        const lock = this.add.text(x, y, "🔒", {
-          fontSize: horizontal ? "18px" : "22px",
-          backgroundColor: "#351719",
-          padding: { x: 3, y: 2 },
-        });
-
-        lock.setOrigin(0.5);
-        lock.setDepth(door.depth + 0.02);
-        door.decorations.push(lock);
-        door.lockIcon = lock;
-      }
-
-      // COLISOES DAS PORTAS
-      this.physics.add.collider(this.player, door);
-      this.physics.add.collider(this.nun, door);
-
-      this.doors.push(door);
-
-      return door;
-    };
-
-    // PORTAS VERTICAIS
-    addDoor(500, 590, 24, 220, false);
-    addDoor(900, 590, 24, 220, true);
-    addDoor(1300, 590, 24, 220, false);
-    addDoor(1900, 590, 24, 220, false);
-
-    // PORTAS HORIZONTAIS
-    addDoor(525, 400, 150, 24, true);
-    addDoor(950, 400, 100, 24, false);
-    addDoor(525, 850, 150, 24, false);
-    addDoor(950, 850, 100, 24, true);
-
-    // Portas da ala sul, posicionadas nos vaos das novas paredes.
-    addDoor(780, 1220, 180, 24, false);
-    addDoor(350, 1370, 24, 60, false);
-    addDoor(900, 1370, 24, 120, false);
-    addDoor(1500, 1370, 24, 120, false);
-
-    this.rebuildObstacles();
-
-    // GRADE DE NAVEGACAO (pathfinding da freira)
-    this.nav = new NavGrid(
-      this.mapWidth,
-      this.mapHeight,
-      32,
-      this.wallRects.concat(this.furnitureRects),
-      16,
-    );
-
-    for (const door of this.doors) {
-      this.nav.addDoor(door, door.rect);
-    }
-
-    // CHAVE EM LOCAL ALEATORIO (sempre alcancavel sem passar por porta trancada)
-    const keySpots = [
-      { x: 280, y: 260 },
-      { x: 350, y: 600 },
-      { x: 700, y: 260 },
-      { x: 700, y: 600 },
-      { x: 1100, y: 260 },
-      { x: 1150, y: 600 },
-      { x: 1500, y: 260 },
-      { x: 1500, y: 700 },
-      { x: 300, y: 1000 },
-      { x: 700, y: 1000 },
-      { x: 1100, y: 1000 },
-      { x: 1450, y: 1000 },
-      { x: 2080, y: 260 },
-      { x: 2220, y: 980 },
-      { x: 1840, y: 1420 },
-      { x: 2200, y: 1420 },
-    ];
-
-    const reachable = this.nav.reachable(this.player.x, this.player.y);
-    const reachableSpots = keySpots.filter((spot) =>
-      this.nav.isReached(reachable, spot.x, spot.y),
-    );
-
-    const validKeySpots = (
-      reachableSpots.length ? reachableSpots : keySpots
-    ).filter(
-      (spot) =>
-        Phaser.Math.Distance.Between(
-          spot.x,
-          spot.y,
-          this.player.x,
-          this.player.y,
-        ) > 260 &&
-        Phaser.Math.Distance.Between(spot.x, spot.y, this.nun.x, this.nun.y) >
-          180 &&
-        Phaser.Math.Distance.Between(spot.x, spot.y, 2290, 1470) > 180,
-    );
-
-    const availableKeySpots = (
-      validKeySpots.length
-        ? validKeySpots
-        : reachableSpots.length
-          ? reachableSpots
-          : keySpots
-    ).slice();
-    const normalKeySpot =
-      Phaser.Utils.Array.RemoveRandomElement(availableKeySpots);
-    const masterKeySpot = Phaser.Utils.Array.GetRandom(availableKeySpots);
-
-    const addCollectibleKey = (spot, texture, onCollect) => {
-      const item = this.add.image(spot.x, spot.y, texture);
-      item
-        .setDisplaySize(20, 42)
-        .setDepth(this.worldDepth(spot.y + item.displayHeight / 2));
-      this.physics.add.existing(item, true);
-      this.tweens.add({
-        targets: item,
-        angle: 360,
-        duration: 4000,
-        repeat: -1,
-      });
-      this.physics.add.overlap(this.player, item, () => {
-        if (this.gameOver || item.collected) return;
-        item.collected = true;
-        item.destroy();
-        this.difficultyItems++;
-        this.changeDifficulty(ENEMY_DIFFICULTY.itemGain);
-        onCollect();
-      });
-      return item;
-    };
-
-    this.keyItem = addCollectibleKey(normalKeySpot, "chave", () => {
-      this.hasKey = true;
-      this.catGuideTarget = masterKeySpot;
-      this.normalKeyIndicator.setVisible(true);
-      this.nunChaseSpeed = this.nunChaseSpeedWithKey;
-      this.say(
-        "Voce encontrou a chave das portas! A freira ouviu o barulho...",
-        5000,
-      );
-      if (this.nunState === "patrol") {
-        this.setNunState("investigate");
-        this.setNunDestination(this.player.x, this.player.y);
-      }
-    });
-    this.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", () => {
-      this.hasMasterKey = true;
-      this.masterKeyIndicator.setVisible(true);
-      this.catGuideTarget = { x: 2290, y: 1470 };
-      this.say("Voce encontrou a chave mestra. Agora alcance a saida!", 5000);
-    });
-    this.catGuideTarget = normalKeySpot;
-    // SAIDA
-    this.exit = this.add.rectangle(2290, 1470, 70, 90, 0x522d2d);
-
-    this.exit.setStrokeStyle(4, 0x98756b);
-    this.exit.setDepth(this.worldDepth(1470 + 45));
-
-    this.physics.add.existing(this.exit, true);
-
-    this.physics.add.overlap(this.player, this.exit, () => {
-      if (this.gameOver) return;
-
-      if (this.hasMasterKey) {
-        this.finish(true);
-      } else {
-        this.say("A saida precisa da chave mestra.");
-      }
-    });
-
-    // COLISAO COM A FREIRA
-    this.physics.add.overlap(this.player, this.nun, () => this.finish(false));
+    buildMap(this, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS });
 
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
@@ -1014,6 +595,10 @@ class AsylumScene extends Phaser.Scene {
 
     // TECLA E: ABRIR E FECHAR PORTAS
     this.input.keyboard.on("keydown-E", () => this.onInteract());
+    this.input.keyboard.on("keydown-F4", () => {
+      this.godMode = !this.godMode;
+      this.say(`God mode ${this.godMode ? "ativado" : "desativado"}.`, 2200);
+    });
 
     // ESPACO: RASTEJAR ATE A OUTRA VENTILACAO (quando escondido)
     this.input.keyboard.on("keydown-SPACE", () => this.onSpacePressed());
@@ -1084,6 +669,7 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(110);
 
+    this.createEnemyDebug();
     this.drawStamina();
     this.updateLighting(0, 0);
     this.createMainMenu();
@@ -1388,7 +974,7 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // ---------------------------------------------------------------
-  // VENTILACOES (atalho entre salas + esconderijo)
+  // GATO (exatamente um por partida)
   // ---------------------------------------------------------------
 
   createVentTexture() {
@@ -1444,7 +1030,7 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla E: sair da ventilacao, entrar numa ou usar uma porta
   onInteract() {
-    if (this.gameOver || !this.gameStarted) return;
+    if (this.gameOver || !this.gameStarted || this.debugCommandFocused) return;
 
     if (this.ventState === "hidden") {
       this.exitVent(false);
@@ -1465,7 +1051,7 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla ESPACO: rastejar ate a outra ponta
   onSpacePressed() {
-    if (this.gameOver) return;
+    if (this.gameOver || this.debugCommandFocused) return;
 
     if (!this.gameStarted) {
       this.gameStarted = true;
@@ -1887,534 +1473,9 @@ class AsylumScene extends Phaser.Scene {
     this.darkTexture.refresh();
   }
 
-  drawEnemyDebug(now, force = false) {
-    if (!this.debugEnemyAI || (!force && now < this.debugDrawAt)) return;
-    this.debugDrawAt = now + 160;
-
-    const g = this.enemyDebugGrid;
-    const cam = this.cameras.main;
-    const size = this.nav.cellSize;
-    const left = Math.max(0, Math.floor(cam.scrollX / size));
-    const top = Math.max(0, Math.floor(cam.scrollY / size));
-    const right = Math.min(
-      this.nav.cols - 1,
-      Math.ceil((cam.scrollX + cam.width / cam.zoom) / size),
-    );
-    const bottom = Math.min(
-      this.nav.rows - 1,
-      Math.ceil((cam.scrollY + cam.height / cam.zoom) / size),
-    );
-
-    g.clear();
-    g.lineStyle(1, 0x9fc69f, 0.18);
-    for (let cx = left; cx <= right; cx++) {
-      const x = cx * size;
-      g.lineBetween(x, top * size, x, (bottom + 1) * size);
-    }
-    for (let cy = top; cy <= bottom; cy++) {
-      const y = cy * size;
-      g.lineBetween(left * size, y, (right + 1) * size, y);
-    }
-
-    g.fillStyle(0xff3b3b, 0.25);
-    for (let cy = top; cy <= bottom; cy++) {
-      for (let cx = left; cx <= right; cx++) {
-        if (!this.nav.isFree(cx, cy)) {
-          g.fillRect(cx * size + 1, cy * size + 1, size - 2, size - 2);
-        }
-      }
-    }
-
-    if (this.nunPath.length) {
-      g.lineStyle(4, 0xffcf4a, 0.95);
-      g.beginPath();
-      g.moveTo(this.nun.x, this.nun.y);
-      for (const point of this.nunPath) g.lineTo(point.x, point.y);
-      g.strokePath();
-      g.fillStyle(0xffcf4a, 1);
-      for (const point of this.nunPath) g.fillCircle(point.x, point.y, 5);
-    } else if (this.nunDest) {
-      g.lineStyle(3, 0xffcf4a, 0.8);
-      g.lineBetween(this.nun.x, this.nun.y, this.nunDest.x, this.nunDest.y);
-      g.fillStyle(0xffcf4a, 1);
-      g.fillCircle(this.nunDest.x, this.nunDest.y, 6);
-    }
-
-    const catPathColors = [0x61d9ff, 0xffa85c, 0xd29aff];
-    this.cats.forEach((cat, index) => {
-      const color = catPathColors[index % catPathColors.length];
-      if (cat.path.length) {
-        g.lineStyle(3, color, 0.95);
-        g.beginPath();
-        g.moveTo(cat.x, cat.y);
-        for (const point of cat.path) g.lineTo(point.x, point.y);
-        g.strokePath();
-        g.fillStyle(color, 1);
-        for (const point of cat.path) g.fillCircle(point.x, point.y, 4);
-      }
-      if (cat.dest) {
-        g.lineStyle(2, color, 0.75);
-        g.fillStyle(color, 1);
-        g.fillCircle(cat.dest.x, cat.dest.y, 6);
-      }
-    });
-
-    const destination = this.nunDest
-      ? `${Math.round(this.nunDest.x)}, ${Math.round(this.nunDest.y)}`
-      : "parada";
-    const lockedDoors = this.doors.filter(
-      (door) => door.isLocked && !door.isOpen,
-    ).length;
-    this.enemyDebugPanel.setText([
-      "DEBUG IA  [F2]",
-      `Freira: ${this.nunState} | A*: ligado`,
-      `Caminho: ${this.nunPath.length}${this.nunPathFailed ? " (sem rota)" : ""}`,
-      `Destino: ${destination}`,
-      `Portas trancadas: ${lockedDoors}`,
-      `Gatos: ${this.cats.length} | A*: nivel ${CAT_AI_DIFFICULTY}`,
-      `Freira: nivel ${this.difficulty.toFixed(2)} (${this.difficultyFollowMultiplier.toFixed(1)}x seguindo gato)`,
-    ]);
-  }
-
-  applyDifficultyTuning(level) {
-    const f = Phaser.Math.Clamp(level / 10, 0, 1);
-    const value = (low, high) => Phaser.Math.Linear(low, high, f);
-    this.nunWanderSpeed = value(55, 82);
-    this.nunInvestigateSpeed = value(76, 112);
-    const chaseSpeed = value(98, 142);
-    this.nunChaseSpeedWithKey = chaseSpeed + value(18, 28);
-    this.nunChaseSpeed = this.hasKey ? this.nunChaseSpeedWithKey : chaseSpeed;
-    this.nunCloseSense = value(90, 145);
-    this.nunFov = value(0.8, 1.1);
-    this.nunVisionRange = value(275, 430);
-    this.nunRunningVisionBonus = value(65, 105);
-    this.nunHearingRange = value(260, 470);
-  }
-
-  setDebugDifficulty(level) {
-    this.difficulty = Phaser.Math.Clamp(level, 0, 10);
-    this.applyDifficultyTuning(this.difficulty);
-    this.nunRepathAt = 0;
-    this.registry.set("enemyDifficulty", this.difficulty);
-  }
-
-  isPlayerFollowingCat() {
-    const playerVelocity = this.player.body.velocity;
-    const playerSpeed = Math.hypot(playerVelocity.x, playerVelocity.y);
-    if (playerSpeed < 25) return false;
-
-    return this.cats.some((cat) => {
-      if (this.time.now < cat.fleeUntil) return false;
-      const catSpeed = Math.hypot(cat.body.velocity.x, cat.body.velocity.y);
-      if (catSpeed < 20) return false;
-      if (
-        Phaser.Math.Distance.Between(
-          this.player.x,
-          this.player.y,
-          cat.x,
-          cat.y,
-        ) > 190
-      ) {
-        return false;
-      }
-
-      const alignment =
-        (playerVelocity.x * cat.body.velocity.x +
-          playerVelocity.y * cat.body.velocity.y) /
-        (playerSpeed * catSpeed);
-      return alignment > 0.2;
-    });
-  }
-
-  updateAdaptiveDifficulty(now, delta) {
-    if (!this.gameStarted || this.gameOver) return;
-
-    this.difficultyPlaySeconds += delta / 1000;
-    if (now < this.difficultyNextUpdate) return;
-    this.difficultyNextUpdate = now + 1000;
-    this.difficultyFollowMultiplier = this.isPlayerFollowingCat() ? 1.5 : 1;
-
-    const previous = this.difficulty;
-    const gain = (0.45 / 60) * this.difficultyFollowMultiplier;
-    this.difficulty = Phaser.Math.Clamp(this.difficulty + gain, 0, 10);
-    if (this.difficulty !== previous) {
-      this.applyDifficultyTuning(this.difficulty);
-      this.nunRepathAt = 0;
-      this.registry.set("enemyDifficulty", this.difficulty);
-    }
-  }
-
-  updateDebugCommandBar() {
-    if (!this.enemyDebugCommandBar) return;
-    this.enemyDebugCommandBar.setText(
-      `> ${this.debugCommand}\n${this.debugCommandMessage}`,
-    );
-  }
-
-  handleDebugCommandKey(event) {
-    if (!this.debugEnemyAI || !this.debugCommandFocused || event.code === "F2")
-      return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    if (event.key === "Enter") {
-      const command = this.debugCommand.trim();
-      const goto = command.match(
-        /^goto\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)$/i,
-      );
-      const difficulty = command.match(
-        /^(?:difficulty|d)\s+([0-9]+(?:\.[0-9]+)?)$/i,
-      );
-      if (/^(?:help|\?)$/i.test(command)) {
-        this.debugCommandMessage =
-          "Comandos: difficulty 0-10, status, repath, goto X Y";
-      } else if (/^status$/i.test(command)) {
-        this.debugCommandMessage = `Freira: ${this.nunState}; A*: ligado; pontos: ${this.nunPath.length}.`;
-      } else if (/^repath$/i.test(command)) {
-        if (this.nunDest) {
-          this.setNunDestination(this.nunDest.x, this.nunDest.y);
-          this.nunRepathAt = 0;
-          this.debugCommandMessage = "Rota recalculada.";
-        } else {
-          this.debugCommandMessage = "A freira ainda nao tem destino.";
-        }
-      } else if (goto) {
-        const x = Phaser.Math.Clamp(Number(goto[1]), 0, this.mapWidth);
-        const y = Phaser.Math.Clamp(Number(goto[2]), 0, this.mapHeight);
-        this.setNunState("investigate");
-        this.setNunDestination(x, y);
-        this.debugCommandMessage = `Destino definido: ${Math.round(x)}, ${Math.round(y)}.`;
-      } else if (difficulty) {
-        const level = Number(difficulty[1]);
-        if (level >= 0 && level <= 10) {
-          this.setDebugDifficulty(level);
-          this.debugCommandMessage = `Dificuldade manual definida: ${level.toFixed(1)}.`;
-        } else {
-          this.debugCommandMessage = "Use um valor entre 0 e 10.";
-        }
-      } else {
-        this.debugCommandMessage = "Comando invalido. Digite help.";
-      }
-      this.debugCommand = "";
-      this.updateDebugCommandBar();
-      return;
-    }
-
-    if (event.key === "Backspace") {
-      this.debugCommand = this.debugCommand.slice(0, -1);
-    } else if (event.key === "Escape") {
-      this.debugCommand = "";
-      this.debugCommandFocused = false;
-      this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
-    } else if (event.key.length === 1 && /^[a-z0-9 ._-]$/i.test(event.key)) {
-      this.debugCommand += event.key;
-    }
-    this.updateDebugCommandBar();
-  }
-
   // ---------------------------------------------------------------
-  // FREIRA
+  // DIFICULDADE ADAPTATIVA
   // ---------------------------------------------------------------
-
-  setNunState(state) {
-    if (this.nunState === state) return;
-
-    this.nunState = state;
-
-    const pursuing = state === "chase" || state === "ventHunt";
-    if (pursuing) {
-      if (this.ambientMusic.isPlaying) this.ambientMusic.pause();
-      if (!this.chaseMusic.isPlaying) this.chaseMusic.play();
-    } else {
-      if (this.chaseMusic.isPlaying) this.chaseMusic.stop();
-      if (this.gameStarted && !this.gameOver && !this.ambientMusic.isPlaying) {
-        if (this.ambientMusic.isPaused) this.ambientMusic.resume();
-        else this.ambientMusic.play();
-      }
-    }
-
-    // destaca a freira em vermelho enquanto ela persegue a personagem
-    this.nunSprite.setTint(
-      state === "chase" || state === "ventHunt" ? 0xffb0b0 : 0xffffff,
-    );
-  }
-
-  updateCats(now) {
-    for (const cat of this.cats) {
-      const distanceToNun = Phaser.Math.Distance.Between(
-        cat.x,
-        cat.y,
-        this.nun.x,
-        this.nun.y,
-      );
-      const distanceToPlayer = Phaser.Math.Distance.Between(
-        cat.x,
-        cat.y,
-        this.player.x,
-        this.player.y,
-      );
-      const playerCanHearCat = distanceToPlayer <= CAT_AUDIBLE_RADIUS;
-      const scared = distanceToNun < 210;
-      if (scared) cat.fleeUntil = now + 700;
-      const fleeing = now < cat.fleeUntil;
-      if (fleeing) {
-        if (!cat.wasScared) {
-          if (cat.scratchPlaying) cat.sprite.stop();
-          cat.scratchPlaying = false;
-          cat.repathAt = 0;
-        }
-      }
-      if (
-        fleeing &&
-        !cat.angryPlayed &&
-        playerCanHearCat &&
-        now >= this.catSoundCooldown
-      ) {
-        this.catAngrySound.play();
-        this.catSoundCooldown = now + 900;
-        cat.angryPlayed = true;
-      }
-      if (!fleeing) cat.angryPlayed = false;
-      cat.wasScared = fleeing;
-
-      if (!fleeing && now >= cat.meowAt) {
-        if (playerCanHearCat && now >= this.catSoundCooldown) {
-          this.catMeowSound.play();
-          this.catSoundCooldown = now + 500;
-          cat.meowAt = now + Phaser.Math.Between(7000, 13000);
-        } else {
-          cat.meowAt = now + 500;
-        }
-      }
-
-      if (now >= cat.repathAt) {
-        if (fleeing) {
-          const angle = Phaser.Math.Angle.Between(
-            this.nun.x,
-            this.nun.y,
-            cat.x,
-            cat.y,
-          );
-          const fleeTarget = {
-            x: Phaser.Math.Clamp(
-              cat.x + Math.cos(angle) * 250,
-              24,
-              this.mapWidth - 24,
-            ),
-            y: Phaser.Math.Clamp(
-              cat.y + Math.sin(angle) * 250,
-              24,
-              this.mapHeight - 24,
-            ),
-          };
-          cat.dest = fleeTarget;
-        } else {
-          cat.dest = this.catGuideTarget;
-        }
-        const path =
-          cat.dest &&
-          this.nav.findPath(cat.x, cat.y, cat.dest.x, cat.dest.y, true);
-        cat.path = path || [];
-        cat.repathAt = now + CAT_REPATH_INTERVAL;
-      }
-
-      const atGuide =
-        !fleeing &&
-        cat.dest &&
-        Phaser.Math.Distance.Between(cat.x, cat.y, cat.dest.x, cat.dest.y) < 58;
-      if (atGuide) {
-        cat.body.setVelocity(0, 0);
-        if (!fleeing && !cat.scratchPlaying && now >= cat.scratchAt) {
-          if (playerCanHearCat) this.catScratchSound.play();
-          cat.scratchPlaying = true;
-          cat.sprite.play(cat.scratchAnimation);
-          cat.scratchAt = now + Phaser.Math.Between(9000, 16000);
-        } else if (
-          !cat.scratchPlaying &&
-          cat.sprite.anims.currentAnim?.key !== cat.idleAnimation
-        ) {
-          cat.sprite.play(cat.idleAnimation);
-        }
-        continue;
-      }
-
-      while (
-        cat.path.length &&
-        Phaser.Math.Distance.Between(
-          cat.x,
-          cat.y,
-          cat.path[0].x,
-          cat.path[0].y,
-        ) < 12
-      ) {
-        cat.path.shift();
-      }
-      const target = cat.path[0];
-      if (!target) {
-        cat.body.setVelocity(0, 0);
-        if (cat.scratchPlaying) {
-          cat.sprite.stop();
-          cat.scratchPlaying = false;
-        }
-        if (cat.sprite.anims.currentAnim?.key !== cat.idleAnimation) {
-          cat.sprite.play(cat.idleAnimation);
-        }
-        continue;
-      }
-      if (cat.scratchPlaying) {
-        cat.sprite.stop();
-        cat.scratchPlaying = false;
-      }
-      const moveAnimation = fleeing ? cat.runAnimation : cat.walkAnimation;
-      if (cat.sprite.anims.currentAnim?.key !== moveAnimation) {
-        cat.sprite.play(moveAnimation);
-      }
-      const angle = Phaser.Math.Angle.Between(cat.x, cat.y, target.x, target.y);
-      cat.body.setVelocity(
-        Math.cos(angle) * (fleeing ? 125 : 72),
-        Math.sin(angle) * (fleeing ? 125 : 72),
-      );
-      cat.setDepth(this.worldDepth(cat.y));
-    }
-  }
-
-  // calcula o caminho ate o destino
-  setNunDestination(x, y) {
-    // Ajusta o destino para o centro da celula livre mais proxima.
-    // Assim o A* sempre termina exatamente no destino e nunArrived() funciona,
-    // mesmo quando o ponto original cai numa celula bloqueada (perto de parede/movel).
-    const snapped = this.nav.nearestFree(x, y);
-    if (snapped) {
-      const c = this.nav.center(snapped.cx, snapped.cy);
-      x = c.x;
-      y = c.y;
-    }
-
-    this.nunDest = { x, y };
-
-    const path = this.nav.findPath(this.nun.x, this.nun.y, x, y);
-
-    this.nunPathFailed = usePath && !path;
-    this.nunPath = path || [];
-  }
-
-  nunArrived() {
-    if (this.nunPath.length > 0) return false;
-    if (!this.nunDest) return true;
-
-    return (
-      Phaser.Math.Distance.Between(
-        this.nun.x,
-        this.nun.y,
-        this.nunDest.x,
-        this.nunDest.y,
-      ) <= 24
-    );
-  }
-
-  stopNun() {
-    this.nun.body.setVelocity(0, 0);
-    this.nunMoving = false;
-  }
-
-  // Segue A* quando habilitado; dificuldade baixa usa deslocamento direto.
-  moveNun(speed, directTarget = null) {
-    let target = directTarget;
-
-    if (!target) {
-      if (
-        this.pathfindingBlend >= 0.99 &&
-        this.nunPath.length === 0 &&
-        !this.nunPathFailed &&
-        this.nunDest
-      ) {
-        this.setNunDestination(this.nunDest.x, this.nunDest.y);
-      }
-
-      while (
-        this.nunPath.length &&
-        Phaser.Math.Distance.Between(
-          this.nun.x,
-          this.nun.y,
-          this.nunPath[0].x,
-          this.nunPath[0].y,
-        ) < 10
-      ) {
-        this.nunPath.shift();
-      }
-
-      if (this.nunPath.length) {
-        target = this.nunPath[0];
-      } else if (
-        (this.nunPathFailed || this.pathfindingBlend < 0.99) &&
-        this.nunDest &&
-        Phaser.Math.Distance.Between(
-          this.nun.x,
-          this.nun.y,
-          this.nunDest.x,
-          this.nunDest.y,
-        ) > 24
-      ) {
-        target = this.nunDest;
-      }
-    }
-
-    if (!target) {
-      this.stopNun();
-      return;
-    }
-
-    const a = Phaser.Math.Angle.Between(
-      this.nun.x,
-      this.nun.y,
-      target.x,
-      target.y,
-    );
-
-    this.nun.body.setVelocity(Math.cos(a) * speed, Math.sin(a) * speed);
-    this.nunMoving = true;
-  }
-
-  moveNunAdaptive(speed, target) {
-    const blend = this.pathfindingBlend || 0;
-    if (blend <= 0.01) {
-      this.moveNun(speed, target);
-      return;
-    }
-
-    while (
-      this.nunPath.length > 1 &&
-      Phaser.Math.Distance.Between(
-        this.nun.x,
-        this.nun.y,
-        this.nunPath[0].x,
-        this.nunPath[0].y,
-      ) < 12
-    ) {
-      this.nunPath.shift();
-    }
-
-    const waypoint = this.nunPath[0] || target;
-    const directAngle = Phaser.Math.Angle.Between(
-      this.nun.x,
-      this.nun.y,
-      target.x,
-      target.y,
-    );
-    const pathAngle = Phaser.Math.Angle.Between(
-      this.nun.x,
-      this.nun.y,
-      waypoint.x,
-      waypoint.y,
-    );
-    const vx =
-      Math.cos(directAngle) * (1 - blend) + Math.cos(pathAngle) * blend;
-    const vy =
-      Math.sin(directAngle) * (1 - blend) + Math.sin(pathAngle) * blend;
-    const length = Math.hypot(vx, vy) || 1;
-    this.nun.body.setVelocity((vx / length) * speed, (vy / length) * speed);
-    this.nunMoving = true;
-  }
 
   difficultyFactor() {
     const { min, max } = ENEMY_DIFFICULTY;
@@ -2427,14 +1488,25 @@ class AsylumScene extends Phaser.Scene {
       ENEMY_DIFFICULTY.min,
       ENEMY_DIFFICULTY.max,
     );
+    this.refreshDifficultyTuning();
+    this.registry.set("enemyDifficulty", this.difficulty);
   }
 
   updateDifficulty(now, dt) {
     this.difficultyPlaySeconds += dt;
     if (now < this.difficultyNextUpdate) return;
     this.difficultyNextUpdate = now + ENEMY_DIFFICULTY.adaptIntervalMs;
-    this.changeDifficulty(ENEMY_DIFFICULTY.survivalGainPerMinute / 60);
-    this.refreshDifficultyTuning();
+
+    // seguir o gato (que guia ate as chaves) faz a dificuldade subir mais rapido
+    this.difficultyFollowMultiplier = this.isPlayerFollowingCat()
+      ? ENEMY_DIFFICULTY.followCatMultiplier
+      : 1;
+
+    const gain =
+      (ENEMY_DIFFICULTY.survivalGainPerMinute / 60) *
+      (ENEMY_DIFFICULTY.adaptIntervalMs / 1000) *
+      this.difficultyFollowMultiplier;
+    this.changeDifficulty(gain);
   }
 
   refreshDifficultyTuning() {
@@ -2456,6 +1528,9 @@ class AsylumScene extends Phaser.Scene {
       patrolWaitMs: value(cfg.patrolWaitMs),
       repathMs: value(cfg.repathMs),
     };
+    this.nunCloseSense = this.adaptiveTuning.closeSense;
+    this.nunFov = Phaser.Math.Linear(0.8, ENEMY_DIFFICULTY.visionHalfAngle, f);
+
     const threshold = ENEMY_DIFFICULTY.pathfindingThreshold;
     const halfBlend = ENEMY_DIFFICULTY.pathfindingBlendRange / 2;
     this.pathfindingBlend = Phaser.Math.Clamp(
@@ -2463,6 +1538,78 @@ class AsylumScene extends Phaser.Scene {
       0,
       1,
     );
+  }
+
+  // ---------------------------------------------------------------
+  // DEBUG DA IA (F3)
+  // ---------------------------------------------------------------
+
+  createEnemyDebug() {
+    this.enemyDebugGrid = this.add.graphics().setDepth(95).setVisible(false);
+
+    this.enemyDebugPanel = this.add
+      .text(12, 84, "", {
+        fontFamily: "monospace",
+        fontSize: "12px",
+        color: "#d8f5d8",
+        backgroundColor: "#000000cc",
+        padding: { x: 8, y: 6 },
+      })
+      .setScrollFactor(0)
+      .setDepth(130)
+      .setVisible(false);
+
+    this.enemyDebugCommandBar = this.add
+      .text(12, 486, "", {
+        fontFamily: "monospace",
+        fontSize: "12px",
+        color: "#ffffff",
+        backgroundColor: "#000000dd",
+        padding: { x: 8, y: 6 },
+      })
+      .setScrollFactor(0)
+      .setDepth(130)
+      .setVisible(false)
+      .setInteractive({ useHandCursor: true });
+
+    this.enemyDebugCommandBar.on("pointerdown", () => {
+      this.debugCommandFocused = true;
+      this.debugCommandMessage = "Console ativo. Enter executa; Esc sai.";
+      this.updateDebugCommandBar();
+    });
+
+    // clicar fora da barra tira o foco
+    this.input.on("pointerdown", (pointer, over) => {
+      if (
+        this.debugCommandFocused &&
+        !over.includes(this.enemyDebugCommandBar)
+      ) {
+        this.debugCommandFocused = false;
+        this.debugCommandMessage = "Clique aqui para digitar: difficulty 0-10";
+        this.updateDebugCommandBar();
+      }
+    });
+
+    this.input.keyboard.addCapture("F3");
+    this.input.keyboard.on("keydown-F3", () => this.toggleEnemyDebug());
+    this.input.keyboard.on("keydown", (event) =>
+      this.handleDebugCommandKey(event),
+    );
+  }
+
+  toggleEnemyDebug() {
+    this.debugEnemyAI = !this.debugEnemyAI;
+    this.enemyDebugGrid.setVisible(this.debugEnemyAI);
+    this.enemyDebugPanel.setVisible(this.debugEnemyAI);
+    this.enemyDebugCommandBar.setVisible(this.debugEnemyAI);
+
+    if (this.debugEnemyAI) {
+      this.updateDebugCommandBar();
+      this.drawEnemyDebug(this.time.now, true);
+    } else {
+      this.debugCommandFocused = false;
+      this.enemyDebugGrid.clear();
+    }
   }
 
   updateDebugCommandBar() {
@@ -2480,26 +1627,47 @@ class AsylumScene extends Phaser.Scene {
 
     if (event.key === "Enter") {
       const command = this.debugCommand.trim();
-      const match = command.match(
+      const goto = command.match(
+        /^goto\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)$/i,
+      );
+      const difficulty = command.match(
         /^(?:difficulty|d)\s+([0-9]+(?:\.[0-9]+)?)$/i,
       );
-      if (match) {
-        const value = Number(match[1]);
-        if (value >= ENEMY_DIFFICULTY.min && value <= ENEMY_DIFFICULTY.max) {
-          this.difficulty = value;
+
+      if (/^(?:help|\?)$/i.test(command)) {
+        this.debugCommandMessage =
+          "Comandos: difficulty 0-10, status, repath, goto X Y";
+      } else if (/^status$/i.test(command)) {
+        this.debugCommandMessage = `Freira: ${this.nunState}; A*: ${Math.round(this.pathfindingBlend * 100)}%; pontos: ${this.nunPath.length}.`;
+      } else if (/^repath$/i.test(command)) {
+        if (this.nunDest) {
+          this.setNunDestination(this.nunDest.x, this.nunDest.y);
+          this.nunRepathAt = 0;
+          this.debugCommandMessage = "Rota recalculada.";
+        } else {
+          this.debugCommandMessage = "A freira ainda nao tem destino.";
+        }
+      } else if (goto) {
+        const x = Phaser.Math.Clamp(Number(goto[1]), 0, this.mapWidth);
+        const y = Phaser.Math.Clamp(Number(goto[2]), 0, this.mapHeight);
+        this.setNunState("investigate");
+        this.setNunDestination(x, y);
+        this.debugCommandMessage = `Destino definido: ${Math.round(x)}, ${Math.round(y)}.`;
+      } else if (difficulty) {
+        const level = Number(difficulty[1]);
+        if (level >= ENEMY_DIFFICULTY.min && level <= ENEMY_DIFFICULTY.max) {
+          this.difficulty = level;
           this.refreshDifficultyTuning();
-          this.registry.set("enemyDifficulty", value);
+          this.registry.set("enemyDifficulty", level);
           this.nunRepathAt = 0;
           if (this.nunDest)
             this.setNunDestination(this.nunDest.x, this.nunDest.y);
-          this.debugCommandMessage = `Dificuldade definida: ${value.toFixed(1)}`;
+          this.debugCommandMessage = `Dificuldade manual definida: ${level.toFixed(1)}.`;
         } else {
           this.debugCommandMessage = `Use um valor entre ${ENEMY_DIFFICULTY.min} e ${ENEMY_DIFFICULTY.max}.`;
         }
-      } else if (/^(?:help|\?)$/i.test(command)) {
-        this.debugCommandMessage = "Comando: difficulty 0-10 (ou d 5)";
       } else {
-        this.debugCommandMessage = "Comando invalido. Use: difficulty 0-10";
+        this.debugCommandMessage = "Comando invalido. Digite help.";
       }
       this.debugCommand = "";
       this.updateDebugCommandBar();
@@ -2510,17 +1678,18 @@ class AsylumScene extends Phaser.Scene {
       this.debugCommand = this.debugCommand.slice(0, -1);
     } else if (event.key === "Escape") {
       this.debugCommand = "";
-      this.debugCommandMessage =
-        "Console ativo. Enter executa; clique fora para sair.";
+      this.debugCommandFocused = false;
+      this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
     } else if (event.key.length === 1 && /^[a-z0-9 ._-]$/i.test(event.key)) {
       this.debugCommand += event.key;
     }
     this.updateDebugCommandBar();
   }
 
-  drawEnemyDebug(now) {
-    if (now < this.debugDrawAt) return;
+  drawEnemyDebug(now, force = false) {
+    if (!this.debugEnemyAI || (!force && now < this.debugDrawAt)) return;
     this.debugDrawAt = now + ENEMY_DIFFICULTY.debugRefreshMs;
+
     const g = this.enemyDebugGrid;
     const cam = this.cameras.main;
     const size = this.nav.cellSize;
@@ -2536,7 +1705,7 @@ class AsylumScene extends Phaser.Scene {
     );
 
     g.clear();
-    g.lineStyle(1, 0x9fc69f, 0.12);
+    g.lineStyle(1, 0x9fc69f, 0.15);
     for (let cx = left; cx <= right; cx++) {
       const x = cx * size;
       g.lineBetween(x, top * size, x, (bottom + 1) * size);
@@ -2545,6 +1714,7 @@ class AsylumScene extends Phaser.Scene {
       const y = cy * size;
       g.lineBetween(left * size, y, (right + 1) * size, y);
     }
+
     g.fillStyle(0xff3b3b, 0.22);
     for (let cy = top; cy <= bottom; cy++) {
       for (let cx = left; cx <= right; cx++) {
@@ -2569,435 +1739,65 @@ class AsylumScene extends Phaser.Scene {
       g.fillCircle(this.nunDest.x, this.nunDest.y, 6);
     }
 
+    const catPathColors = [0x61d9ff, 0xffa85c, 0xd29aff];
+    this.cats.forEach((cat, index) => {
+      const color = catPathColors[index % catPathColors.length];
+      if (cat.path.length) {
+        g.lineStyle(3, color, 0.95);
+        g.beginPath();
+        g.moveTo(cat.x, cat.y);
+        for (const point of cat.path) g.lineTo(point.x, point.y);
+        g.strokePath();
+        g.fillStyle(color, 1);
+        for (const point of cat.path) g.fillCircle(point.x, point.y, 4);
+      }
+      if (cat.dest) {
+        g.fillStyle(color, 1);
+        g.fillCircle(cat.dest.x, cat.dest.y, 6);
+      }
+    });
+
     const tune = this.adaptiveTuning;
+    const destination = this.nunDest
+      ? `${Math.round(this.nunDest.x)}, ${Math.round(this.nunDest.y)}`
+      : "parada";
+    const lockedDoors = this.doors.filter(
+      (door) => door.isLocked && !door.isOpen,
+    ).length;
+
     this.enemyDebugPanel.setText([
-      `DEBUG IA  [F3]`,
-      `Dificuldade: ${this.difficulty.toFixed(2)} / ${ENEMY_DIFFICULTY.max}`,
+      "DEBUG IA  [F3]",
+      `Dificuldade: ${this.difficulty.toFixed(2)} / ${ENEMY_DIFFICULTY.max} (${this.difficultyFollowMultiplier.toFixed(1)}x seguindo gato)`,
       `Freira: ${this.nunState} | A*: ${Math.round(this.pathfindingBlend * 100)}%`,
-      `Caminho: ${this.nunPath.length}${this.nunPathFailed ? " (fallback)" : ""}`,
-      `Visao: ${Math.round(tune?.visionRange ?? 330)} | Audicao: ${Math.round(tune?.hearingRange ?? 380)}`,
-      `Perseg.: ${Math.round(tune?.chaseMemoryMs ?? 1400)}ms | Recalculo: ${Math.round(tune?.repathMs ?? 250)}ms`,
+      `Caminho: ${this.nunPath.length}${this.nunPathFailed ? " (fallback)" : ""} | Destino: ${destination}`,
+      `Visao: ${Math.round(tune.visionRange)} | Audicao: ${Math.round(tune.hearingRange)}`,
+      `Perseg.: ${Math.round(tune.chaseMemoryMs)}ms | Recalculo: ${Math.round(tune.repathMs)}ms`,
       `Sobreviveu: ${Math.floor(this.difficultyPlaySeconds)}s | Itens: ${this.difficultyItems} | Fugas: ${this.difficultyEscapes}`,
       `Quase pega: ${this.difficultyNearMisses} | Capturas: ${this.difficultyCatches}`,
+      `Portas trancadas: ${lockedDoors} | Gatos: ${this.cats.length} (A* nivel ${CAT_AI_DIFFICULTY})`,
     ]);
   }
 
-  // a freira enxerga: alcance, cone de visao (ou muito perto) e linha de visao livre
-  nunCanSee(visionRange) {
-    // escondido ou rastejando na ventilacao: ninguem te ve
-    if (this.ventState !== "none") return false;
-
-    const nx = this.nun.x;
-    const ny = this.nun.y;
-    const px = this.player.x;
-    const py = this.player.y;
-
-    const dist = Phaser.Math.Distance.Between(nx, ny, px, py);
-
-    if (dist > visionRange) return false;
-
-    const angleTo = Math.atan2(py - ny, px - nx);
-    const diff = Math.abs(Phaser.Math.Angle.Wrap(angleTo - this.nunFacing));
-
-    if (dist > this.nunCloseSense && diff > this.nunFov) return false;
-
-    return this.hasLineOfSight(nx, ny, px, py);
-  }
-
-  // escolhe um ponto de patrulha alcancavel (as vezes perto do jogador)
-  pickPatrolTarget() {
-    const visited = this.nav.reachable(this.nun.x, this.nun.y);
-    if (!visited) return;
-    const pool = ENEMY_DIFFICULTY.patrolPoints.filter((point) => {
-      const { cx, cy } = this.nav.toCell(point.x, point.y);
-      return (
-        this.nav.isReached(visited, point.x, point.y) &&
-        Phaser.Math.Distance.Between(point.x, point.y, this.nun.x, this.nun.y) >
-          220 &&
-        this.nav.isFree(cx, cy)
-      );
-    });
-    if (!pool.length) return;
-    const target = Phaser.Utils.Array.GetRandom(pool);
-
-    this.setNunDestination(target.x, target.y);
-  }
-
-  // escolhe um ponto proximo para "procurar" o jogador
-  pickSearchSpot() {
-    const spots = [];
-    const base = this.nun;
-
-    for (let i = 0; i < 14; i++) {
-      const x = base.x + Phaser.Math.Between(-220, 220);
-      const y = base.y + Phaser.Math.Between(-220, 220);
-      const cell = this.nav.toCell(x, y);
-
-      if (this.nav.isFree(cell.cx, cell.cy)) spots.push({ x, y });
-    }
-
-    if (!spots.length) return false;
-
-    const t = Phaser.Utils.Array.GetRandom(spots);
-
-    this.setNunDestination(t.x, t.y);
-    return true;
-  }
-
-  onNunSpotted() {
-    this.say("A FREIRA TE VIU!", 2500);
-    this.screamSound.play();
-    this.cameras.main.shake(220, 0.006);
-  }
-
-  updateNun(now, delta) {
-    const nun = this.nun;
-    const px = this.player.x;
-    const py = this.player.y;
-    const dist = Phaser.Math.Distance.Between(nun.x, nun.y, px, py);
-
-    // A FREIRA ABRE PORTAS DESTRANCADAS
-    for (const door of this.doors) {
-      if (door.isOpen || door.isLocked) continue;
-
-      if (this.distanceToDoor(door, nun.x, nun.y) < 40) {
-        this.setDoorOpen(door, true);
-
-        if (dist < 520) this.say("Uma porta se abriu por perto...", 2500);
-      }
-    }
-
-    // PERCEPCAO
-    const visionRange = this.playerRunning ? 430 : 330;
-    const seesPlayer = this.nunCanSee(visionRange);
-    const heardPlayer =
-      this.playerRunning && this.ventState === "none" && dist <= 380;
-
-    if (seesPlayer) {
-      if (this.nunState !== "chase") {
-        this.onNunSpotted();
-        this.nunChaseStartedAt = now;
-        this.nunNearMissCounted = false;
-      }
-
-      this.nunHunt = null;
-      this.setNunState("chase");
-      this.nunLastSeen = { x: px, y: py };
-      this.nunLastSeenAt = now;
-    } else if (this.nunState === "chase") {
-      // perdeu o jogador de vista: vai ate onde viu por ultimo e procura
-      if (now - this.nunLastSeenAt > tune.chaseMemoryMs) {
-        this.difficultyEscapes++;
-        this.changeDifficulty(ENEMY_DIFFICULTY.escapeGain);
-        if (
-          !this.nunNearMissCounted &&
-          now - this.nunChaseStartedAt >= ENEMY_DIFFICULTY.chaseEndNearMissMs
-        ) {
-          this.difficultyNearMisses++;
-          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
-        }
-        this.setNunState("search");
-        this.nunSearchUntil = 0;
-        this.setNunDestination(this.nunLastSeen.x, this.nunLastSeen.y);
-      }
-    } else if (heardPlayer && this.nunState === "patrol") {
-      this.setNunState("investigate");
-      this.setNunDestination(px, py);
-    }
-
-    // COMPORTAMENTO POR ESTADO
-    switch (this.nunState) {
-      case "chase": {
-        const target = seesPlayer ? { x: px, y: py } : this.nunLastSeen;
-
-        if (now >= this.nunRepathAt) {
-          this.setNunDestination(target.x, target.y);
-          this.nunRepathAt = now + tune.repathMs;
-        }
-
-        if (
-          this.nunState === "chase" &&
-          seesPlayer &&
-          dist <= ENEMY_DIFFICULTY.nearMissDistance &&
-          !this.nunNearMissCounted
-        ) {
-          this.nunNearMissCounted = true;
-          this.difficultyNearMisses++;
-          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
-        }
-        this.moveNunAdaptive(this.nunChaseSpeed, target);
-        break;
-      }
-
-      case "ventHunt": {
-        // ela viu voce entrar: vai ate a ventilacao e, se nao te achar, confere a outra ponta
-        const h = this.nunHunt;
-
-        if (!h || now > h.expireAt) {
-          this.nunHunt = null;
-          this.setNunState("patrol");
-          this.nunDest = null;
-          break;
-        }
-
-        if (now >= this.nunRepathAt) {
-          this.setNunDestination(h.target.x, h.target.y);
-          this.nunRepathAt = now + tune.repathMs;
-        }
-
-        this.moveNun(this.nunChaseSpeed);
-
-        const dTarget = Phaser.Math.Distance.Between(
-          nun.x,
-          nun.y,
-          h.target.x,
-          h.target.y,
-        );
-
-        if (dTarget < 36 || (dTarget < 80 && this.nunArrived())) {
-          if (h.stage === "toEntry") {
-            const inside =
-              this.ventState === "hidden" &&
-              this.ventAt &&
-              this.ventAt.pair === h.entry.pair &&
-              this.ventAt.side === h.entry.side;
-
-            if (inside) {
-              this.finish(
-                false,
-                "A freira puxou você para fora da ventilação!",
-              );
-              break;
-            }
-
-            // voce ja rastejou: ela vai esperar na outra ponta
-            const other = this.ventPartner(h.entry);
-
-            h.stage = "toExit";
-            h.target = { x: other.x, y: other.y };
-            this.setNunDestination(other.x, other.y);
-            this.nunRepathAt = now + 400;
-          } else {
-            // chegou na saida: fica ali parada, de olho
-            this.nunHunt = null;
-            this.setNunState("search");
-            this.nunWaitUntil = now + tune.patrolWaitMs;
-            this.nunSearchUntil = now + tune.searchDurationMs;
-            this.nunDest = null;
-            this.stopNun();
-          }
-        }
-        break;
-      }
-
-      case "investigate": {
-        this.moveNun(this.nunInvestigateSpeed);
-
-        if (this.nunArrived()) {
-          this.setNunState("search");
-          this.nunSearchUntil = now + tune.searchDurationMs;
-          this.nunWaitUntil = now + tune.patrolWaitMs * 0.35;
-          this.nunDest = null;
-        }
-        break;
-      }
-
-      case "search": {
-        if (this.nunSearchUntil === 0) {
-          // ainda indo ao ultimo ponto visto
-          this.moveNun(this.nunInvestigateSpeed);
-
-          if (this.nunArrived()) {
-            this.nunSearchUntil = now + tune.searchDurationMs;
-            this.nunWaitUntil = now + tune.patrolWaitMs * 0.35;
-            this.nunDest = null;
-          }
-        } else if (now > this.nunSearchUntil) {
-          this.setNunState("patrol");
-          this.nunSearchUntil = 0;
-          this.nunDest = null;
-          this.nunWaitUntil = 0;
-        } else if (now < this.nunWaitUntil) {
-          this.stopNun();
-        } else {
-          if (!this.nunDest || this.nunArrived()) {
-            if (this.nunDest) {
-              this.nunDest = null;
-              const wait = tune.patrolWaitMs;
-              this.nunWaitUntil =
-                now + wait * Phaser.Math.FloatBetween(0.65, 1.35);
-              this.stopNun();
-              break;
-            }
-
-            this.pickSearchSpot();
-          }
-
-          this.moveNun(this.nunWanderSpeed);
-        }
-        break;
-      }
-
-      default: {
-        // patrol
-        if (now < this.nunWaitUntil) {
-          this.stopNun();
-          break;
-        }
-
-        if (!this.nunDest) {
-          this.pickPatrolTarget();
-        } else if (this.nunArrived()) {
-          this.nunDest = null;
-          const wait = tune.patrolWaitMs;
-          this.nunWaitUntil = now + wait * Phaser.Math.FloatBetween(0.65, 1.35);
-          this.stopNun();
-          break;
-        }
-
-        this.moveNun(this.nunWanderSpeed);
-      }
-    }
-
-    // DETECTA SE ESTA PRESA NA PAREDE
-    if (now > this.nunStuckCheckAt) {
-      const moved = Phaser.Math.Distance.Between(
-        nun.x,
-        nun.y,
-        this.nunLastPos.x,
-        this.nunLastPos.y,
-      );
-
-      if (this.nunMoving && moved < 8) {
-        if (this.nunState === "chase") {
-          this.nunRepathAt = 0;
-        } else if (this.nunState === "patrol") {
-          this.nunDest = null;
-          this.nunPath = [];
-        } else {
-          this.setNunDestination(
-            this.nunDest ? this.nunDest.x : nun.x,
-            this.nunDest ? this.nunDest.y : nun.y,
-          );
-        }
-      }
-
-      this.nunLastPos = { x: nun.x, y: nun.y };
-      this.nunStuckCheckAt = now + 700;
-    }
-
-    // DIRECAO PARA ONDE ELA OLHA (acompanha o movimento)
-    const v = nun.body.velocity;
-
-    if (Math.hypot(v.x, v.y) > 10) {
-      const target = Math.atan2(v.y, v.x);
-      const diff = Phaser.Math.Angle.Wrap(target - this.nunFacing);
-      const step = 6 * (delta / 1000);
-
-      this.nunFacing += Phaser.Math.Clamp(diff, -step, step);
-    }
-  }
-
   // ---------------------------------------------------------------
-  // LOOP PRINCIPAL
+  // FREIRA
   // ---------------------------------------------------------------
 
   update(time, delta) {
     if (this.gameOver || !this.gameStarted) return;
 
     const dt = delta / 1000;
-    const k = this.keys;
-    let dx = 0;
-    let dy = 0;
+    this.updatePlayer(time, delta);
 
-    if (k.A.isDown || k.LEFT.isDown) dx--;
-    if (k.D.isDown || k.RIGHT.isDown) dx++;
-    if (k.W.isDown || k.UP.isDown) dy--;
-    if (k.S.isDown || k.DOWN.isDown) dy++;
-
-    // dentro da ventilacao o jogador nao anda
-    if (this.ventState !== "none") {
-      dx = 0;
-      dy = 0;
-    }
-
-    const moving = dx !== 0 || dy !== 0;
-    const length = Math.hypot(dx, dy) || 1;
-
-    // CORRIDA COM STAMINA
-    if (this.staminaLocked && this.stamina > 30) this.staminaLocked = false;
-
-    const running =
-      k.SHIFT.isDown && moving && !this.staminaLocked && this.stamina > 0;
-
-    if (running) {
-      this.stamina = Math.max(0, this.stamina - 38 * dt);
-      if (this.stamina <= 0) this.staminaLocked = true;
-    } else {
-      this.stamina = Math.min(100, this.stamina + (moving ? 14 : 26) * dt);
-    }
-
-    this.playerRunning = running;
-
-    const movementSound = running ? this.runningSound : this.footstepSound;
-    const otherMovementSound = running ? this.footstepSound : this.runningSound;
-    if (moving) {
-      if (otherMovementSound.isPlaying) otherMovementSound.stop();
-      if (!movementSound.isPlaying) movementSound.play();
-    } else {
-      this.footstepSound.stop();
-      this.runningSound.stop();
-    }
-
-    // Os sprites idle estao nomeados ao contrario da orientacao que mostram.
-    const facingLeft = moving ? dx < 0 : Math.cos(this.playerFacingAngle) > 0;
-    const direction = facingLeft ? "left" : "right";
-    const animation = moving
-      ? `mila-${running ? "run" : "walk"}-${direction}`
-      : `mila-idle-${direction}`;
-    if (this.playerSprite.anims.currentAnim?.key !== animation) {
-      this.playerSprite.play(animation);
-    }
-
-    const speed = running ? this.runSpeed : this.walkSpeed;
-
-    this.player.body.setVelocity((dx / length) * speed, (dy / length) * speed);
-
-    // MIRA DA LANTERNA: mouse (se mexeu recentemente) ou direcao do movimento
-    let targetAngle = null;
-
-    if (!moving || time - this.lastPointerMoveAt < 2500) {
-      const pointer = this.input.activePointer;
-      const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-
-      if (
-        Phaser.Math.Distance.Between(this.player.x, this.player.y, wp.x, wp.y) >
-        12
-      ) {
-        targetAngle = Phaser.Math.Angle.Between(
-          this.player.x,
-          this.player.y,
-          wp.x,
-          wp.y,
-        );
-      }
-    }
-
-    if (targetAngle === null && moving) targetAngle = Math.atan2(dy, dx);
-
-    if (targetAngle !== null) {
-      const diff = Phaser.Math.Angle.Wrap(targetAngle - this.playerFacingAngle);
-      const step = 10 * dt;
-
-      this.playerFacingAngle += Phaser.Math.Clamp(diff, -step, step);
-    }
+    // DIFICULDADE ADAPTATIVA
+    this.updateDifficulty(time, dt);
 
     // VENTILACOES (ar) E DICA DE INTERACAO
     this.updateVent(time, dt);
     this.updateHint();
 
-    // FREIRA
+    // FREIRA E GATO
     this.updateNun(time, delta);
+    this.updateCats(time);
 
     // MEDO: quanto mais perto a freira, mais o coracao bate e a luz falha
     const nunDist = Phaser.Math.Distance.Between(
@@ -3015,6 +1815,7 @@ class AsylumScene extends Phaser.Scene {
     this.updateLighting(time, fear);
     this.drawStamina();
     this.drawBreath();
+    this.drawEnemyDebug(time);
 
     if (this.statusUntil && time > this.statusUntil) {
       this.status.setVisible(false);
@@ -3026,7 +1827,20 @@ class AsylumScene extends Phaser.Scene {
   finish(won, message) {
     if (this.gameOver) return;
 
+    // O modo de teste impede que a freira encerre a partida.
+    if (!won && this.godMode) {
+      this.say("God mode ativo: a freira nao pode te capturar.", 2200);
+      return;
+    }
+
     this.gameOver = true;
+
+    // ser capturado alivia a dificuldade para a proxima partida
+    if (!won) {
+      this.difficultyCatches++;
+      this.changeDifficulty(-ENEMY_DIFFICULTY.caughtLoss);
+    }
+    this.registry.set("enemyDifficulty", this.difficulty);
 
     if (this.crawlTween) this.crawlTween.stop();
     this.ambientMusic.stop();
@@ -3097,6 +1911,10 @@ class AsylumScene extends Phaser.Scene {
     });
   }
 }
+
+installCatMethods(AsylumScene, ENEMY_DIFFICULTY);
+installNunMethods(AsylumScene, ENEMY_DIFFICULTY);
+installPlayerMethods(AsylumScene);
 
 // CONFIGURACAO DO PHASER
 const config = {
