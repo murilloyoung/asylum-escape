@@ -196,6 +196,24 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
   }
 
   // a freira enxerga: alcance, cone de visao (ou muito perto) e linha de visao livre
+  nunDetectsFlashlight() {
+    if (!this.flashlightOn || this.ventState !== "none") return false;
+
+    const dx = this.nun.x - this.player.x;
+    const dy = this.nun.y - this.player.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > this.lightRange) return false;
+
+    const angleToNun = Math.atan2(dy, dx);
+    const diff = Math.abs(
+      Phaser.Math.Angle.Wrap(angleToNun - this.playerFacingAngle),
+    );
+    return (
+      diff <= this.lightHalfAngle &&
+      this.hasLineOfSight(this.player.x, this.player.y, this.nun.x, this.nun.y)
+    );
+  }
+
   nunCanSee(visionRange) {
     // escondido ou rastejando na ventilacao: ninguem te ve
     if (this.ventState !== "none") return false;
@@ -289,7 +307,8 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
     // PERCEPCAO
     const visionRange =
       tune.visionRange + (this.playerRunning ? tune.runningVisionBonus : 0);
-    const seesPlayer = this.nunCanSee(visionRange);
+    const seesPlayer =
+      this.nunCanSee(visionRange) || this.nunDetectsFlashlight();
     const heardPlayer =
       this.playerRunning &&
       this.ventState === "none" &&

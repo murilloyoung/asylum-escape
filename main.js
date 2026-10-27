@@ -541,13 +541,14 @@ class AsylumScene extends Phaser.Scene {
     this.lightRayCount = 90;
     this.ambientRange = 100;
     this.lightDipUntil = 0;
+    this.flashlightOn = true;
     this.statusUntil = 0;
 
     buildMap(this, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS });
 
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
-      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,SPACE",
+      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,F,SPACE",
     );
 
     // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
@@ -595,6 +596,10 @@ class AsylumScene extends Phaser.Scene {
 
     // TECLA E: ABRIR E FECHAR PORTAS
     this.input.keyboard.on("keydown-E", () => this.onInteract());
+    this.input.keyboard.on("keydown-F", () => {
+      this.flashlightOn = !this.flashlightOn;
+      this.say(`Lanterna ${this.flashlightOn ? "ligada" : "desligada"}.`, 1400);
+    });
     this.input.keyboard.on("keydown-F4", () => {
       this.godMode = !this.godMode;
       this.say(`God mode ${this.godMode ? "ativado" : "desativado"}.`, 2200);
@@ -1435,7 +1440,7 @@ class AsylumScene extends Phaser.Scene {
 
     let core = null;
 
-    if (!inVent) {
+    if (!inVent && this.flashlightOn) {
       // CONE LARGO E SUAVE (penumbra) E CONE CENTRAL FORTE
       const soft = this.buildVisibility(
         angle,
