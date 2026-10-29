@@ -8,8 +8,11 @@
     <title>Asylum Escape</title>
 
     <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="multiplayer.css" />
 
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.min.js"></script>
+    <!-- PeerJS: conexao P2P (WebRTC) para o multiplayer, funciona no GitHub Pages -->
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script type="module" src="main.js"></script>
   </head>
 
@@ -18,6 +21,44 @@
 
     <div id="help">
       WASD / SETAS: mover · SHIFT: correr · MOUSE: mirar lanterna · F: ligar/desligar lanterna · E: portas e ventilações · ESPAÇO: rastejar · Encontre as chaves e escape!
+    </div>
+
+    <!-- LOBBY MULTIPLAYER -->
+    <div id="mp-lobby" class="mp-hidden" role="dialog" aria-modal="true" aria-label="Multiplayer">
+      <div class="mp-card">
+        <h2>MULTIPLAYER</h2>
+
+        <section id="mp-home">
+          <label>
+            SEU APELIDO
+            <input id="mp-name" maxlength="12" autocomplete="off" placeholder="Jogador" />
+          </label>
+          <button id="mp-create" type="button">CRIAR SALA</button>
+
+          <div class="mp-sep">ou entre em uma sala existente</div>
+
+          <label>
+            CÓDIGO DA SALA
+            <input id="mp-code" maxlength="5" autocomplete="off" placeholder="ABC12" />
+          </label>
+          <button id="mp-join" type="button">ENTRAR EM SALA</button>
+          <button id="mp-back" type="button" class="mp-secondary">VOLTAR</button>
+        </section>
+
+        <section id="mp-room" class="mp-hidden">
+          <div class="mp-code-label">CÓDIGO DA SALA</div>
+          <div class="mp-code-row">
+            <span id="mp-room-code"></span>
+            <button id="mp-copy" type="button">COPIAR</button>
+          </div>
+          <ul id="mp-players"></ul>
+          <p id="mp-room-hint"></p>
+          <button id="mp-start" type="button" class="mp-hidden">INICIAR PARTIDA</button>
+          <button id="mp-leave" type="button" class="mp-secondary">SAIR DA SALA</button>
+        </section>
+
+        <p id="mp-status" role="status"></p>
+      </div>
     </div>
   </body>
 </html>

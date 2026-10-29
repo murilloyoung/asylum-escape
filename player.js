@@ -1,6 +1,11 @@
 // Criacao do jogador e movimento (andar, correr, stamina, mira da lanterna).
 export function createPlayer(scene) {
-  const player = scene.add.container(110, 250);
+  // No multiplayer cada jogador nasce em um ponto proprio (slot) perto do inicio.
+  const slot = scene.mpSlot || 0;
+  const player = scene.add.container(
+    110 + (slot % 2) * 40,
+    250 + Math.floor(slot / 2) * 40,
+  );
   player.setDepth(scene.characterDepth);
 
   const sprite = scene.add
@@ -20,6 +25,14 @@ export function createPlayer(scene) {
 export function installPlayerMethods(Scene) {
   const Methods = class {
     updatePlayer(time, delta) {
+      // multiplayer: jogador capturado vira espectador
+      if (this.localDead) {
+        this.footstepSound.stop();
+        this.runningSound.stop();
+        this.playerRunning = false;
+        return;
+      }
+
       const dt = delta / 1000;
       const k = this.keys;
       let dx = 0;

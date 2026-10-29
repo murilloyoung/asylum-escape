@@ -2,6 +2,33 @@ import { generateMapLayout, buildMap } from "./map.js";
 import { installNunMethods } from "./nun.js";
 import { installCatMethods, CAT_AI_DIFFICULTY } from "./cat.js";
 import { installPlayerMethods } from "./player.js";
+import { net } from "./net.js";
+import { initLobby } from "./lobby.js";
+
+// ==== MULTIPLAYER: AJUSTES (valores faceis de mexer) ====
+const NET_SEND_MS = 66; // ~15 envios por segundo
+const TEAM_DIFFICULTY = {
+  // pesos da "eficiencia da equipe" (somam 1)
+  weightProgress: 0.3, // velocidade media de progressao
+  weightCohesion: 0.25, // proximidade em grupo
+  weightNoise: 0.2, // ruido acumulado (tempo correndo)
+  weightKeyTempo: 0.25, // tempo para achar as chaves
+  // variacao da dificuldade por minuto: eficiencia 0 -> minimo, eficiencia 1 -> maximo
+  ratePerMinuteMin: -0.35,
+  ratePerMinuteMax: 1.6,
+  smoothing: 0.15, // suavizacao (EMA) das metricas
+  cohesionNear: 250, // distancia media em que a equipe e "colada"
+  cohesionFar: 900, // distancia media em que a equipe esta dispersa
+  keyTempoFastSec: 45, // achar chaves antes disso = pontuacao maxima
+  keyTempoSlowSec: 285, // achar chaves depois disso = pontuacao zero
+  deathLossFactor: 0.6, // cada morte alivia caughtLoss * fator
+  lowAliveRatio: 0.5, // com menos da metade viva, o ganho de dificuldade cai
+  lowAliveGainFactor: 0.5,
+};
+
+// O lobby (HTML) fica fora da cena para sobreviver aos reinicios.
+let activeScene = null;
+const lobby = initLobby({ onStart: () => activeScene?.startMultiplayerAsHost() });
 
 // ==== NAV START ====
 // GRADE DE NAVEGACAO (sem dependencia do Phaser)
@@ -397,6 +424,11 @@ class AsylumScene extends Phaser.Scene {
     super("Asylum");
   }
 
+  // data: { mp: true, setup? } quando a cena e (re)iniciada em modo multiplayer
+  init(data) {
+    this.mpData = data && data.mp ? data : null;
+  }
+
   preload() {
     const playerPath = "assets/personagens/player/";
     for (const [key, file] of Object.entries({
@@ -440,6 +472,42 @@ class AsylumScene extends Phaser.Scene {
   }
 
   create() {
+    activeScene = this;
+
+    // MULTIPLAYER: papel desta instancia (host = servidor autoritativo)
+    this.mp = !!this.mpData && net.active;
+    this.isHostMp = this.mp && net.isHost;
+    this.isClientMp = this.mp && !net.isHost;
+    this.netSetup = this.isClientMp ? this.mpData.setup : null;
+    this.localDead = false;
+    this.spectated = null;
+    this.remotePlayers = new Map();
+    this.netSendAt = 0;
+    this.mpWaiting = null;
+    this.teamHudAt = 0;
+    this.spectateAt = 0;
+    this.nunNetTarget = null;
+    this.teamStats = {
+      playSeconds: 0,
+      dist: 0,
+      noise: 0,
+      lastPos: new Map(),
+      progress: 0.5,
+      cohesion: 0.5,
+      noiseLevel: 0,
+      tempo: 1,
+      efficiency: 0.5,
+      keyTimes: {},
+      deaths: 0,
+    };
+    this.mpSlots = {};
+    if (this.mp) {
+      this.mpSlots = this.isClientMp
+        ? this.netSetup.slots
+        : Object.fromEntries(net.players.map((p, i) => [p.id, i]));
+    }
+    this.mpSlot = this.mp ? this.mpSlots[net.myId] || 0 : 0;
+
     this.gameOver = false;
     this.gameStarted = false;
     this.godMode = false;
@@ -456,7 +524,7 @@ class AsylumScene extends Phaser.Scene {
     this.catSoundCooldown = 0;
     this.cats = []; // sempre reiniciado: um unico gato e criado por partida
 
-    this.mapLayout = generateMapLayout();
+    this.mapLayout = this.netSetup ? this.netSetup.layout : generateMapLayout();
     this.mapWidth = this.mapLayout.width;
     this.mapHeight = this.mapLayout.height;
     this.worldDepth = (y) =>
@@ -503,7 +571,9 @@ class AsylumScene extends Phaser.Scene {
     this.nunStuckCheckAt = 0;
     this.nunHunt = null; // quando ela viu voce entrar numa ventilacao
     this.difficulty = Phaser.Math.Clamp(
-      this.registry.get("enemyDifficulty") ?? ENEMY_DIFFICULTY.start,
+      // multiplayer sempre comeca do zero (a dificuldade e da equipe, nao do jogador)
+      (this.mp ? null : this.registry.get("enemyDifficulty")) ??
+        ENEMY_DIFFICULTY.start,
       ENEMY_DIFFICULTY.min,
       ENEMY_DIFFICULTY.max,
     );
@@ -545,6 +615,7 @@ class AsylumScene extends Phaser.Scene {
     this.statusUntil = 0;
 
     buildMap(this, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS });
+    if (this.mp) this.setupMultiplayer();
 
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
@@ -674,10 +745,38 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(110);
 
+    this.teamText = this.add
+      .text(940, 48, "", {
+        fontSize: "13px",
+        color: "#d8d2c2",
+        align: "right",
+        stroke: "#000000",
+        strokeThickness: 3,
+        lineSpacing: 2,
+      })
+      .setOrigin(1, 0)
+      .setScrollFactor(0)
+      .setDepth(100)
+      .setVisible(this.mp);
+
     this.createEnemyDebug();
     this.drawStamina();
     this.updateLighting(0, 0);
-    this.createMainMenu();
+    // no multiplayer o menu inicial e pulado: a partida comeca pelo lobby
+    if (!this.mp) {
+      this.createMainMenu();
+
+      // Quem esta no lobby (menu) como cliente entra na partida quando o host inicia.
+      const offStart = net.on("msg", (id, msg) => {
+        if (msg.t !== "start" || !net.active || net.isHost) return;
+        lobby.close();
+        net.inGame = true;
+        this.scene.restart({ mp: true, setup: msg.setup });
+      });
+      this.events.once("shutdown", offStart);
+    } else {
+      this.say("Sincronizando com a sala...", 8000);
+    }
   }
 
   // ---------------------------------------------------------------
@@ -749,15 +848,41 @@ class AsylumScene extends Phaser.Scene {
       repeat: -1,
     });
 
+    // BOTAO MULTIPLAYER (abre o lobby HTML)
+    const multiplayerButton = add(
+      this.add
+        .rectangle(276, 448, 400, 40, 0x171a22)
+        .setStrokeStyle(1, 0x5d6f8f)
+        .setInteractive({ useHandCursor: true }),
+    );
     add(
-      this.add.text(80, 472, "WASD / SETAS  mover     SHIFT  correr", {
+      this.add
+        .text(276, 448, "MULTIPLAYER", {
+          fontFamily: "Arial",
+          fontSize: "15px",
+          fontStyle: "bold",
+          color: "#cfd8ea",
+          letterSpacing: 2,
+        })
+        .setOrigin(0.5),
+    );
+    multiplayerButton.on("pointerover", () =>
+      multiplayerButton.setFillStyle(0x27304a),
+    );
+    multiplayerButton.on("pointerout", () =>
+      multiplayerButton.setFillStyle(0x171a22),
+    );
+    multiplayerButton.on("pointerdown", () => lobby.open());
+
+    add(
+      this.add.text(80, 490, "WASD / SETAS  mover     SHIFT  correr", {
         fontFamily: "Arial",
         fontSize: "13px",
         color: "#8f8d88",
       }),
     );
     add(
-      this.add.text(80, 497, "E  interagir     ESPAÇO  rastejar", {
+      this.add.text(80, 513, "E  interagir     ESPAÇO  rastejar", {
         fontFamily: "Arial",
         fontSize: "13px",
         color: "#8f8d88",
@@ -819,6 +944,10 @@ class AsylumScene extends Phaser.Scene {
 
     const updates = [
       [
+        "MULTIPLAYER",
+        "Crie uma sala, passe o código e fujam juntos. A freira aprende com a equipe.",
+      ],
+      [
         "MAPA AMPLIADO",
         "Novas alas a leste e ao sul, com uma saída mais distante.",
       ],
@@ -831,7 +960,7 @@ class AsylumScene extends Phaser.Scene {
     ];
 
     updates.forEach(([title, description], index) => {
-      const y = 154 + index * 86;
+      const y = 150 + index * 70;
       add(this.add.circle(604, y + 6, 3, 0x9c3434));
       add(
         this.add.text(618, y - 5, title, {
@@ -899,7 +1028,7 @@ class AsylumScene extends Phaser.Scene {
     return nearest;
   }
 
-  setDoorOpen(door, open) {
+  setDoorOpen(door, open, fromNet = false) {
     door.isOpen = open;
     door.setVisible(!open);
     door.body.enable = !open;
@@ -911,6 +1040,144 @@ class AsylumScene extends Phaser.Scene {
     }
 
     this.rebuildObstacles();
+    if (this.mp && !fromNet) this.netSendDoor(door);
+  }
+
+  // ---------------------------------------------------------------
+  // MULTIPLAYER: PORTAS, CHAVES E JOGADORES
+  // ---------------------------------------------------------------
+
+  localPlayerId() {
+    return this.mp ? net.myId : "local";
+  }
+
+  netBroadcast(msg, exceptId = null) {
+    if (this.isHostMp) net.broadcast(msg, exceptId);
+  }
+
+  netSendDoor(door) {
+    const msg = {
+      t: "door",
+      i: door.doorIndex,
+      open: door.isOpen,
+      locked: door.isLocked,
+    };
+    if (this.isHostMp) net.broadcast(msg);
+    else if (this.isClientMp) net.sendToHost(msg);
+  }
+
+  applyDoorState(index, open, locked) {
+    const door = this.doors[index];
+    if (!door) return;
+    if (!locked && door.isLocked) this.unlockDoor(door);
+    if (door.isOpen !== open) this.setDoorOpen(door, open, true);
+  }
+
+  // dificuldade: eventos individuais pesam menos quando ha varios jogadores
+  difficultyScale() {
+    if (!this.mp) return 1;
+    return 1 / Math.sqrt(Math.max(1, this.getPlayerStates().length));
+  }
+
+  eventDifficulty(amount) {
+    this.changeDifficulty(amount * this.difficultyScale());
+  }
+
+  // Lista unificada dos jogadores vivos (local + remotos). Usada pela IA da freira.
+  getPlayerStates() {
+    const list = [];
+    if (!this.localDead) {
+      list.push({
+        id: this.localPlayerId(),
+        x: this.player.x,
+        y: this.player.y,
+        running: this.playerRunning,
+        ventState: this.ventState,
+        ventAt: this.ventAt,
+        facing: this.playerFacingAngle,
+        flashlightOn: this.flashlightOn,
+      });
+    }
+    if (this.mp) {
+      for (const g of this.remotePlayers.values()) {
+        if (g.dead || g.left) continue;
+        list.push({
+          id: g.id,
+          x: g.container.x,
+          y: g.container.y,
+          running: g.running,
+          ventState: g.ventState,
+          ventAt: g.ventAt,
+          facing: g.facing,
+          flashlightOn: g.flashlightOn,
+        });
+      }
+    }
+    return list;
+  }
+
+  // coleta de chave: compartilhada por toda a equipe
+  collectKey(which, opts = {}) {
+    if (this.gameOver) return;
+    const item = which === "master" ? this.masterKeyItem : this.keyItem;
+    if (!item || item.collected) return;
+
+    item.collected = true;
+    item.destroy();
+
+    if (this.mp) {
+      if (this.isHostMp) net.broadcast({ t: "key", which }, opts.fromId ?? null);
+      else if (!opts.fromNet) net.sendToHost({ t: "key", which });
+    }
+
+    if (which === "normal") {
+      this.hasKey = true;
+      this.catGuideTarget = this.masterKeySpot;
+      this.normalKeyIndicator.setVisible(true);
+      this.say(
+        "A equipe encontrou a chave das portas! A freira ouviu o barulho...",
+        5000,
+      );
+    } else {
+      this.hasMasterKey = true;
+      this.masterKeyIndicator.setVisible(true);
+      this.catGuideTarget = { x: 2290, y: 1470 };
+      this.say("A chave mestra foi encontrada. Alcancem a saida!", 5000);
+    }
+
+    // efeitos na IA: so o host (ou o jogo solo) mexe na freira e na dificuldade
+    if (this.mp && !this.isHostMp) return;
+    this.difficultyItems++;
+    this.eventDifficulty(ENEMY_DIFFICULTY.itemGain);
+    this.teamStats.keyTimes[which] = this.teamStats.playSeconds;
+
+    if (which === "normal" && this.nunState === "patrol") {
+      const pos = opts.pos || { x: this.player.x, y: this.player.y };
+      this.setNunState("investigate");
+      this.setNunDestination(pos.x, pos.y);
+    }
+  }
+
+  onExitReached() {
+    if (!this.mp) {
+      if (this.hasMasterKey) this.finish(true);
+      else this.say("A saida precisa da chave mestra.");
+      return;
+    }
+    if (!this.hasMasterKey) {
+      this.say("A saida precisa da chave mestra.");
+      return;
+    }
+    if (this.isHostMp) this.finish(true, "Sua equipe escapou do asilo!");
+    else net.sendToHost({ t: "exit" });
+  }
+
+  onPlayerCaught(id, message) {
+    if (!this.mp) {
+      this.finish(false, message);
+      return;
+    }
+    this.killPlayer(id, message);
   }
 
   unlockDoor(door) {
@@ -935,6 +1202,10 @@ class AsylumScene extends Phaser.Scene {
       obj.x - hw - pad < r.right &&
       obj.y + hh + pad > r.top &&
       obj.y - hh - pad < r.bottom;
+
+    for (const g of this.remotePlayers.values()) {
+      if (!g.dead && !g.left && hit(g.container, 11, 15)) return false;
+    }
 
     return !hit(this.player, 11, 15) && !hit(this.nun, 13, 19);
   }
@@ -972,7 +1243,7 @@ class AsylumScene extends Phaser.Scene {
 
     if (wasLocked) this.unlockDoor(door);
 
-    this.setDoorOpen(door, true);
+    this.setDoorOpen(door, true); // no multiplayer isso avisa os outros jogadores
     this.say(
       wasLocked ? "Você destrancou e abriu a porta." : "Você abriu a porta.",
     );
@@ -1035,7 +1306,13 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla E: sair da ventilacao, entrar numa ou usar uma porta
   onInteract() {
-    if (this.gameOver || !this.gameStarted || this.debugCommandFocused) return;
+    if (
+      this.gameOver ||
+      !this.gameStarted ||
+      this.debugCommandFocused ||
+      this.localDead
+    )
+      return;
 
     if (this.ventState === "hidden") {
       this.exitVent(false);
@@ -1056,9 +1333,11 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla ESPACO: rastejar ate a outra ponta
   onSpacePressed() {
-    if (this.gameOver || this.debugCommandFocused) return;
+    if (this.gameOver || this.debugCommandFocused || net.lobbyOpen) return;
 
     if (!this.gameStarted) {
+      // dentro de uma sala, quem inicia a partida e o host pelo lobby
+      if (this.mp || net.active) return;
       this.gameStarted = true;
       this.mainMenu.setVisible(false);
       this.ambientMusic.play();
@@ -1102,14 +1381,26 @@ class AsylumScene extends Phaser.Scene {
       return;
     }
 
-    // ela te viu entrar? (confere antes de sumir)
-    const tune = this.adaptiveTuning;
-    const saw =
-      this.nunCanSee(
-        tune.visionRange + (this.playerRunning ? tune.runningVisionBonus : 0),
-      ) ||
-      (this.nunState === "chase" &&
-        now - this.nunLastSeenAt < tune.chaseMemoryMs);
+    // ela te viu entrar? (confere antes de sumir; no cliente quem decide e o host)
+    let outcome = "quiet";
+    if (this.isClientMp) {
+      net.sendToHost({
+        t: "vent",
+        pair: vent.pair,
+        side: vent.side,
+        running: this.playerRunning,
+      });
+    } else {
+      outcome = this.nunReactToVentEntry(
+        {
+          id: this.localPlayerId(),
+          x: this.player.x,
+          y: this.player.y,
+          running: this.playerRunning,
+        },
+        vent,
+      );
+    }
     this.ventEscapePending =
       this.nunState === "chase" || this.nunState === "ventHunt";
 
@@ -1122,19 +1413,14 @@ class AsylumScene extends Phaser.Scene {
     this.player.body.enable = false;
     this.player.setVisible(false);
 
-    if (saw) {
-      this.nunHunt = {
-        stage: "toEntry",
-        entry: vent,
-        target: { x: vent.x, y: vent.y },
-        expireAt: now + tune.ventHuntMs,
-      };
+    this.showVentOutcome(outcome);
+  }
 
-      this.setNunState("ventHunt");
-      this.nunRepathAt = 0;
+  showVentOutcome(outcome) {
+    if (outcome === "saw") {
       this.say("A freira viu você entrar na ventilação!", 3500);
       this.cameras.main.shake(180, 0.005);
-    } else if (this.makeNoise(vent.x, vent.y, tune.hearingRange)) {
+    } else if (outcome === "heard") {
       this.say("A ventilação rangeu... a freira ouviu!", 3000);
     } else {
       this.say("Você entrou na ventilação.", 2500);
@@ -1161,8 +1447,12 @@ class AsylumScene extends Phaser.Scene {
         this.ventState = "hidden";
         this.ventAt = to;
         if (this.ventEscapePending) {
-          this.difficultyEscapes++;
-          this.changeDifficulty(ENEMY_DIFFICULTY.escapeGain);
+          if (this.isClientMp) {
+            net.sendToHost({ t: "escape" });
+          } else {
+            this.difficultyEscapes++;
+            this.eventDifficulty(ENEMY_DIFFICULTY.escapeGain);
+          }
           this.ventEscapePending = false;
         }
         this.say("Você chegou na outra ventilação.", 2500);
@@ -1197,7 +1487,11 @@ class AsylumScene extends Phaser.Scene {
 
     if (force) {
       this.say("Sem ar! Você saiu tossindo.");
-      this.makeNoise(v.x, v.y, 360);
+      if (this.isClientMp) {
+        net.sendToHost({ t: "noise", x: v.x, y: v.y, r: 360 });
+      } else {
+        this.makeNoise(v.x, v.y, 360);
+      }
     }
   }
 
@@ -1396,6 +1690,13 @@ class AsylumScene extends Phaser.Scene {
   updateLighting(now, fear) {
     if (!this.darkContext || !this.player) return;
 
+    // espectador (capturado no multiplayer): sem escuridao, ve tudo
+    if (this.localDead) {
+      this.darkContext.clearRect(0, 0, this.scale.width, this.scale.height);
+      this.darkTexture.refresh();
+      return;
+    }
+
     const ctx = this.darkContext;
     const width = this.scale.width;
     const height = this.scale.height;
@@ -1494,7 +1795,7 @@ class AsylumScene extends Phaser.Scene {
       ENEMY_DIFFICULTY.max,
     );
     this.refreshDifficultyTuning();
-    this.registry.set("enemyDifficulty", this.difficulty);
+    if (!this.mp) this.registry.set("enemyDifficulty", this.difficulty);
   }
 
   updateDifficulty(now, dt) {
@@ -1780,6 +2081,12 @@ class AsylumScene extends Phaser.Scene {
       `Sobreviveu: ${Math.floor(this.difficultyPlaySeconds)}s | Itens: ${this.difficultyItems} | Fugas: ${this.difficultyEscapes}`,
       `Quase pega: ${this.difficultyNearMisses} | Capturas: ${this.difficultyCatches}`,
       `Portas trancadas: ${lockedDoors} | Gatos: ${this.cats.length} (A* nivel ${CAT_AI_DIFFICULTY})`,
+      ...(this.mp
+        ? [
+            `Equipe(${this.getPlayerStates().length} vivos) efic: ${Math.round(this.teamStats.efficiency * 100)}%`,
+            `prog ${Math.round(this.teamStats.progress * 100)}% | coesao ${Math.round(this.teamStats.cohesion * 100)}% | ruido ${Math.round(this.teamStats.noiseLevel * 100)}% | chaves ${Math.round(this.teamStats.tempo * 100)}%`,
+          ]
+        : []),
     ]);
   }
 
@@ -1788,21 +2095,44 @@ class AsylumScene extends Phaser.Scene {
   // ---------------------------------------------------------------
 
   update(time, delta) {
+    if (this.isHostMp && this.mpWaiting) this.checkMpStart(time);
     if (this.gameOver || !this.gameStarted) return;
 
     const dt = delta / 1000;
     this.updatePlayer(time, delta);
 
-    // DIFICULDADE ADAPTATIVA
-    this.updateDifficulty(time, dt);
+    if (!this.mp) {
+      // DIFICULDADE ADAPTATIVA
+      this.updateDifficulty(time, dt);
 
-    // VENTILACOES (ar) E DICA DE INTERACAO
-    this.updateVent(time, dt);
-    this.updateHint();
+      // VENTILACOES (ar) E DICA DE INTERACAO
+      this.updateVent(time, dt);
+      this.updateHint();
 
-    // FREIRA E GATO
-    this.updateNun(time, delta);
-    this.updateCats(time);
+      // FREIRA E GATO
+      this.updateNun(time, delta);
+      this.updateCats(time);
+    } else if (this.isHostMp) {
+      // HOST: simula tudo e manda o estado para os clientes
+      this.smoothRemotePlayers(delta);
+      this.updateTeamDifficulty(time, dt);
+      this.updateVent(time, dt);
+      this.updateHint();
+      this.updateNun(time, delta);
+      this.updateCats(time);
+      this.checkRemoteCaptures();
+      this.sendSnapshot(time);
+      this.updateSpectator(time);
+    } else {
+      // CLIENTE: simula so o proprio jogador; freira e gato vem do host
+      this.smoothRemotePlayers(delta);
+      this.smoothNetWorld(delta);
+      this.updateVent(time, dt);
+      this.updateHint();
+      this.sendLocalState(time);
+      this.updateSpectator(time);
+    }
+    if (this.mp) this.updateTeamHud(time);
 
     // MEDO: quanto mais perto a freira, mais o coracao bate e a luz falha
     const nunDist = Phaser.Math.Distance.Between(
@@ -1829,23 +2159,28 @@ class AsylumScene extends Phaser.Scene {
   }
 
   // FINAL DO JOGO
-  finish(won, message) {
+  finish(won, message, fromNet = false) {
     if (this.gameOver) return;
 
     // O modo de teste impede que a freira encerre a partida.
-    if (!won && this.godMode) {
+    if (!won && this.godMode && !this.mp) {
       this.say("God mode ativo: a freira nao pode te capturar.", 2200);
       return;
     }
 
+    // host avisa todos os jogadores do resultado
+    if (this.isHostMp && !fromNet) net.broadcast({ t: "end", won, message });
+
     this.gameOver = true;
 
-    // ser capturado alivia a dificuldade para a proxima partida
-    if (!won) {
-      this.difficultyCatches++;
-      this.changeDifficulty(-ENEMY_DIFFICULTY.caughtLoss);
+    if (!this.mp) {
+      // ser capturado alivia a dificuldade para a proxima partida
+      if (!won) {
+        this.difficultyCatches++;
+        this.changeDifficulty(-ENEMY_DIFFICULTY.caughtLoss);
+      }
+      this.registry.set("enemyDifficulty", this.difficulty);
     }
-    this.registry.set("enemyDifficulty", this.difficulty);
 
     if (this.crawlTween) this.crawlTween.stop();
     this.ambientMusic.stop();
@@ -1858,7 +2193,7 @@ class AsylumScene extends Phaser.Scene {
     this.physics.pause();
 
     this.add
-      .rectangle(480, 280, 520, 230, 0x080808, 0.97)
+      .rectangle(480, this.mp ? 300 : 280, 520, this.mp ? 300 : 230, 0x080808, 0.97)
       .setScrollFactor(0)
       .setDepth(200);
 
@@ -1889,8 +2224,11 @@ class AsylumScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(201);
 
+    if (this.mp) this.createMultiplayerEndButtons();
+    if (this.isClientMp) return; // cliente espera o host iniciar outra partida
+
     const restartButton = this.add
-      .text(480, 335, "⟳  RECOMEÇAR", {
+      .text(480, 335, this.mp ? "⟳  NOVA PARTIDA" : "⟳  RECOMEÇAR", {
         fontFamily: "Arial",
         fontSize: "20px",
         color: "#ffffff",
@@ -1912,8 +2250,595 @@ class AsylumScene extends Phaser.Scene {
 
     restartButton.on("pointerdown", () => {
       restartButton.disableInteractive();
-      this.scene.restart();
+      if (this.isHostMp) this.startMultiplayerAsHost();
+      else this.scene.restart();
     });
+  }
+
+  // ---------------------------------------------------------------
+  // MULTIPLAYER
+  // ---------------------------------------------------------------
+
+  createMultiplayerEndButtons() {
+    if (this.isClientMp) {
+      this.add
+        .text(480, 335, "Aguardando o host iniciar uma nova partida...", {
+          fontSize: "15px",
+          color: "#aaa69d",
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(202);
+    }
+
+    const leave = this.add
+      .text(480, 400, "SAIR DA SALA", {
+        fontFamily: "Arial",
+        fontSize: "15px",
+        color: "#cccccc",
+        backgroundColor: "#2a2a2e",
+        padding: { x: 18, y: 8 },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(202)
+      .setInteractive({ useHandCursor: true });
+
+    leave.on("pointerdown", () => {
+      net.leave();
+      this.scene.restart(); // volta ao menu principal (modo solo)
+    });
+  }
+
+  // Host: sorteia o mapa (ja feito em buildMap), avisa os clientes e espera todos ficarem prontos.
+  setupMultiplayer() {
+    this.netUnsubs = [
+      net.on("msg", (id, msg) => this.onNetMessage(id, msg)),
+      net.on("playerleft", (id) => this.onPlayerLeft(id)),
+      net.on("closed", () => this.onHostLost()),
+      net.on("error", (text) => this.say(text, 4000)),
+    ];
+    this.events.once("shutdown", () => {
+      for (const off of this.netUnsubs) off();
+    });
+
+    for (const p of net.players) {
+      if (p.id !== net.myId) this.addRemotePlayer(p.id, p.name);
+    }
+
+    if (this.isHostMp) {
+      const setup = {
+        layout: this.mapLayout,
+        nun: this.nunSpawnSetup,
+        keys: this.keySetup,
+        cat: this.catSetup,
+        slots: this.mpSlots,
+      };
+      net.broadcast({ t: "start", setup });
+      this.mpWaiting = new Set(
+        net.players.filter((p) => p.id !== net.myId).map((p) => p.id),
+      );
+      this.mpWaitUntil = this.time.now + 6000;
+    } else {
+      net.sendToHost({ t: "ready" });
+    }
+  }
+
+  addRemotePlayer(id, name) {
+    const slot = this.mpSlots[id] || 0;
+    const container = this.add.container(
+      110 + (slot % 2) * 40,
+      250 + Math.floor(slot / 2) * 40,
+    );
+    container.setDepth(this.characterDepth);
+    const sprite = this.add
+      .sprite(0, 0, "milaIdleRight")
+      .setOrigin(0.5, 0.5)
+      .setScale(1.5);
+    sprite.play("mila-idle-right");
+    const label = this.add
+      .text(0, -30, name, {
+        fontSize: "11px",
+        color: "#f1e6ce",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5);
+    container.add([sprite, label]);
+
+    this.remotePlayers.set(id, {
+      id,
+      name,
+      container,
+      sprite,
+      target: { x: container.x, y: container.y },
+      anim: "mila-idle-right",
+      running: false,
+      ventState: "none",
+      ventAt: null,
+      facing: 0,
+      flashlightOn: true,
+      dead: false,
+      left: false,
+    });
+  }
+
+  startMultiplayerAsHost() {
+    if (!net.isHost) return;
+    net.inGame = true;
+    lobby.close();
+    this.scene.restart({ mp: true });
+  }
+
+  checkMpStart(time) {
+    if (this.mpWaiting.size === 0 || this.time.now > this.mpWaitUntil) {
+      this.mpWaiting = null;
+      this.beginMatch();
+    }
+  }
+
+  beginMatch() {
+    this.gameStarted = true;
+    this.ambientMusic.play();
+    this.say("Encontrem a chave e escapem juntos.", 6000);
+    if (this.isHostMp) net.broadcast({ t: "go" });
+  }
+
+  onPlayerLeft(id) {
+    const g = this.remotePlayers.get(id);
+    if (!g) return;
+    g.left = true;
+    g.container.setVisible(false);
+    if (this.mpWaiting) this.mpWaiting.delete(id);
+    if (!this.gameOver && this.gameStarted && this.getPlayerStates().length === 0) {
+      this.finish(false, "Toda a equipe foi capturada...");
+    }
+  }
+
+  onHostLost() {
+    if (!this.isClientMp || this.gameOver) return;
+    this.finish(false, "A conexão com o host foi perdida.", true);
+  }
+
+  // ---- mensagens recebidas ----
+  onNetMessage(id, msg) {
+    if (this.isHostMp) {
+      switch (msg.t) {
+        case "ready":
+          if (this.mpWaiting) this.mpWaiting.delete(id);
+          break;
+        case "p":
+          this.applyRemoteState(id, msg);
+          break;
+        case "door":
+          this.applyDoorState(msg.i, msg.open, msg.locked);
+          net.broadcast(msg, id);
+          break;
+        case "key": {
+          const g = this.remotePlayers.get(id);
+          this.collectKey(msg.which, {
+            fromNet: true,
+            fromId: id,
+            pos: g ? { x: g.container.x, y: g.container.y } : null,
+          });
+          break;
+        }
+        case "vent": {
+          const g = this.remotePlayers.get(id);
+          const vent = this.vents.find(
+            (v) => v.pair === msg.pair && v.side === msg.side,
+          );
+          if (!g || !vent || g.dead) break;
+          const outcome = this.nunReactToVentEntry(
+            { id, x: vent.x, y: vent.y, running: !!msg.running },
+            vent,
+          );
+          net.sendTo(id, { t: "ventResult", outcome });
+          break;
+        }
+        case "noise":
+          this.makeNoise(msg.x, msg.y, Math.min(msg.r || 0, 400));
+          break;
+        case "escape":
+          this.difficultyEscapes++;
+          this.eventDifficulty(ENEMY_DIFFICULTY.escapeGain);
+          break;
+        case "exit":
+          if (this.hasMasterKey && !this.gameOver) {
+            this.finish(true, "Sua equipe escapou do asilo!");
+          }
+          break;
+        default:
+      }
+      return;
+    }
+
+    // cliente
+    switch (msg.t) {
+      case "start":
+        lobby.close();
+        net.inGame = true;
+        this.scene.restart({ mp: true, setup: msg.setup });
+        break;
+      case "go":
+        if (!this.gameStarted) this.beginMatch();
+        break;
+      case "s":
+        this.applySnapshot(msg);
+        break;
+      case "door":
+        this.applyDoorState(msg.i, msg.open, msg.locked);
+        break;
+      case "key":
+        this.collectKey(msg.which, { fromNet: true });
+        break;
+      case "ventResult":
+        this.showVentOutcome(msg.outcome);
+        break;
+      case "spot":
+        this.onNunSpotted(true);
+        break;
+      case "dead":
+        this.onDeadMessage(msg);
+        break;
+      case "end":
+        this.finish(msg.won, msg.message, true);
+        break;
+      default:
+    }
+  }
+
+  applyRemoteState(id, msg) {
+    const g = this.remotePlayers.get(id);
+    if (!g || g.dead) return;
+    g.target = { x: msg.x, y: msg.y };
+    g.anim = msg.a;
+    g.running = !!msg.r;
+    g.ventState = msg.v || "none";
+    g.ventAt = msg.vt ? { pair: msg.vt[0], side: msg.vt[1] } : null;
+    g.facing = msg.f || 0;
+    g.flashlightOn = !!msg.fo;
+  }
+
+  // ---- jogadores remotos (suavizacao e animacao) ----
+  smoothRemotePlayers(delta) {
+    const k = Math.min(1, delta / 90);
+    for (const g of this.remotePlayers.values()) {
+      const visible = !g.dead && !g.left && g.ventState === "none";
+      g.container.setVisible(visible);
+      if (g.dead || g.left) continue;
+
+      const dx = g.target.x - g.container.x;
+      const dy = g.target.y - g.container.y;
+      if (Math.hypot(dx, dy) > 250) g.container.setPosition(g.target.x, g.target.y);
+      else g.container.setPosition(g.container.x + dx * k, g.container.y + dy * k);
+
+      if (g.anim && g.sprite.anims.currentAnim?.key !== g.anim && this.anims.exists(g.anim)) {
+        g.sprite.play(g.anim);
+      }
+    }
+  }
+
+  // Cliente: move a copia da freira e do gato ate a posicao enviada pelo host.
+  smoothNetWorld(delta) {
+    const k = Math.min(1, delta / 90);
+    if (this.nunNetTarget) {
+      const dx = this.nunNetTarget.x - this.nun.x;
+      const dy = this.nunNetTarget.y - this.nun.y;
+      if (Math.hypot(dx, dy) > 250) this.nun.setPosition(this.nunNetTarget.x, this.nunNetTarget.y);
+      else this.nun.setPosition(this.nun.x + dx * k, this.nun.y + dy * k);
+      this.nun.setDepth(this.worldDepth(this.nun.y));
+    }
+    for (const cat of this.cats) {
+      const t = cat.netTarget;
+      if (!t) continue;
+      const dx = t.x - cat.x;
+      const dy = t.y - cat.y;
+      if (Math.hypot(dx, dy) > 250) cat.setPosition(t.x, t.y);
+      else cat.setPosition(cat.x + dx * k, cat.y + dy * k);
+      cat.setDepth(this.worldDepth(cat.y));
+    }
+  }
+
+  // ---- envio ----
+  localAnim() {
+    return this.playerSprite.anims.currentAnim?.key;
+  }
+
+  sendLocalState(time) {
+    if (this.localDead || time < this.netSendAt) return;
+    this.netSendAt = time + NET_SEND_MS;
+    net.sendToHost({
+      t: "p",
+      x: Math.round(this.player.x * 10) / 10,
+      y: Math.round(this.player.y * 10) / 10,
+      a: this.localAnim(),
+      r: this.playerRunning ? 1 : 0,
+      v: this.ventState,
+      vt: this.ventAt ? [this.ventAt.pair, this.ventAt.side] : null,
+      f: Math.round(this.playerFacingAngle * 100) / 100,
+      fo: this.flashlightOn ? 1 : 0,
+    });
+  }
+
+  sendSnapshot(time) {
+    if (time < this.netSendAt) return;
+    this.netSendAt = time + NET_SEND_MS;
+
+    const players = [
+      {
+        id: net.myId,
+        x: Math.round(this.player.x * 10) / 10,
+        y: Math.round(this.player.y * 10) / 10,
+        a: this.localAnim(),
+        r: this.playerRunning ? 1 : 0,
+        v: this.ventState,
+        vt: this.ventAt ? [this.ventAt.pair, this.ventAt.side] : null,
+        f: Math.round(this.playerFacingAngle * 100) / 100,
+        fo: this.flashlightOn ? 1 : 0,
+        d: this.localDead ? 1 : 0,
+      },
+    ];
+    for (const g of this.remotePlayers.values()) {
+      players.push({
+        id: g.id,
+        x: g.target.x,
+        y: g.target.y,
+        a: g.anim,
+        r: g.running ? 1 : 0,
+        v: g.ventState,
+        vt: g.ventAt ? [g.ventAt.pair, g.ventAt.side] : null,
+        f: g.facing,
+        fo: g.flashlightOn ? 1 : 0,
+        d: g.dead || g.left ? 1 : 0,
+      });
+    }
+
+    net.broadcast({
+      t: "s",
+      pl: players,
+      nun: {
+        x: Math.round(this.nun.x * 10) / 10,
+        y: Math.round(this.nun.y * 10) / 10,
+        st: this.nunState,
+        fc: Math.round(this.nunFacing * 100) / 100,
+      },
+      cat: this.cats[0]
+        ? {
+            x: Math.round(this.cats[0].x * 10) / 10,
+            y: Math.round(this.cats[0].y * 10) / 10,
+            an: this.cats[0].sprite.anims.currentAnim?.key,
+            fx: this.cats[0].sprite.flipX ? 1 : 0,
+          }
+        : null,
+      df: Math.round(this.difficulty * 100) / 100,
+    });
+  }
+
+  applySnapshot(msg) {
+    for (const p of msg.pl) {
+      if (p.id === net.myId) continue;
+      const g = this.remotePlayers.get(p.id);
+      if (!g) continue;
+      g.target = { x: p.x, y: p.y };
+      g.anim = p.a;
+      g.running = !!p.r;
+      g.ventState = p.v || "none";
+      g.ventAt = p.vt ? { pair: p.vt[0], side: p.vt[1] } : null;
+      g.facing = p.f || 0;
+      g.flashlightOn = !!p.fo;
+      if (p.d && !g.dead) {
+        g.dead = true;
+        g.container.setVisible(false);
+      }
+    }
+
+    this.nunNetTarget = { x: msg.nun.x, y: msg.nun.y };
+    this.nunFacing = msg.nun.fc;
+    this.setNunState(msg.nun.st);
+
+    const cat = this.cats[0];
+    if (cat && msg.cat) {
+      cat.netTarget = { x: msg.cat.x, y: msg.cat.y };
+      if (msg.cat.an && cat.sprite.anims.currentAnim?.key !== msg.cat.an) {
+        cat.sprite.play(msg.cat.an);
+      }
+      cat.sprite.setFlipX(!!msg.cat.fx);
+    }
+    this.difficulty = msg.df;
+  }
+
+  // ---- capturas e espectador ----
+  checkRemoteCaptures() {
+    for (const g of this.remotePlayers.values()) {
+      if (g.dead || g.left || g.ventState !== "none") continue;
+      if (
+        Math.abs(g.container.x - this.nun.x) < 24 &&
+        Math.abs(g.container.y - this.nun.y) < 34
+      ) {
+        this.killPlayer(g.id);
+      }
+    }
+  }
+
+  killPlayer(id, message) {
+    if (!this.isHostMp || this.gameOver) return;
+
+    if (id === net.myId) {
+      if (this.localDead) return;
+      if (this.godMode) {
+        this.say("God mode ativo: a freira nao pode te capturar.", 2200);
+        return;
+      }
+      this.markLocalDead(message);
+    } else {
+      const g = this.remotePlayers.get(id);
+      if (!g || g.dead || g.left) return;
+      g.dead = true;
+      g.container.setVisible(false);
+      this.say(`${g.name} foi capturado!`, 3500);
+    }
+
+    net.broadcast({ t: "dead", id, message });
+    this.teamStats.deaths++;
+    this.difficultyCatches++;
+    // equipe com baixas: a pressao diminui moderadamente
+    this.changeDifficulty(
+      -ENEMY_DIFFICULTY.caughtLoss * TEAM_DIFFICULTY.deathLossFactor,
+    );
+
+    if (this.getPlayerStates().length === 0) {
+      this.finish(false, "Toda a equipe foi capturada...");
+    }
+  }
+
+  onDeadMessage(msg) {
+    if (msg.id === net.myId) {
+      this.markLocalDead(msg.message);
+    } else {
+      const g = this.remotePlayers.get(msg.id);
+      if (g && !g.dead) {
+        g.dead = true;
+        g.container.setVisible(false);
+        this.say(`${g.name} foi capturado!`, 3500);
+      }
+    }
+  }
+
+  markLocalDead(message) {
+    if (this.localDead) return;
+    this.localDead = true;
+    if (this.crawlTween) {
+      this.crawlTween.stop();
+      this.crawlTween = null;
+    }
+    this.ventState = "none";
+    this.ventAt = null;
+    this.player.setVisible(false);
+    this.player.body.setVelocity(0, 0);
+    this.player.body.enable = false;
+    this.footstepSound.stop();
+    this.runningSound.stop();
+    this.say(message || "A freira pegou você! Acompanhe seus colegas.", 6000);
+    this.cameras.main.shake(300, 0.01);
+    this.spectateAt = 0;
+  }
+
+  // espectador: a camera acompanha um colega vivo
+  updateSpectator(time) {
+    if (!this.localDead || time < this.spectateAt) return;
+    this.spectateAt = time + 500;
+    const alive = Array.from(this.remotePlayers.values()).find(
+      (g) => !g.dead && !g.left,
+    );
+    if (alive && this.spectated !== alive.id) {
+      this.spectated = alive.id;
+      this.cameras.main.startFollow(alive.container, true, 0.1, 0.1);
+    }
+  }
+
+  // ---- dificuldade adaptativa baseada na equipe (somente no host) ----
+  keyTempoScore(seconds) {
+    const fast = TEAM_DIFFICULTY.keyTempoFastSec;
+    const slow = TEAM_DIFFICULTY.keyTempoSlowSec;
+    return Phaser.Math.Clamp(1 - (seconds - fast) / (slow - fast), 0, 1);
+  }
+
+  updateTeamDifficulty(now, dt) {
+    const t = this.teamStats;
+    t.playSeconds += dt;
+
+    const alive = this.getPlayerStates();
+    for (const p of alive) {
+      // distancia percorrida a pe (rastejar na ventilacao nao conta como progresso)
+      const prev = t.lastPos.get(p.id);
+      if (prev && p.ventState === "none") {
+        t.dist += Math.hypot(p.x - prev.x, p.y - prev.y);
+      }
+      t.lastPos.set(p.id, { x: p.x, y: p.y });
+      if (p.running) t.noise += dt;
+    }
+
+    if (now < this.difficultyNextUpdate) return;
+    this.difficultyNextUpdate = now + ENEMY_DIFFICULTY.adaptIntervalMs;
+    const interval = ENEMY_DIFFICULTY.adaptIntervalMs / 1000;
+    const n = alive.length;
+    const a = TEAM_DIFFICULTY.smoothing;
+
+    if (n > 0) {
+      // 1) velocidade media de progressao (px/s por jogador, relativo a corrida)
+      const progress = Phaser.Math.Clamp(t.dist / n / interval / this.runSpeed, 0, 1);
+      t.progress = Phaser.Math.Linear(t.progress, progress, a);
+
+      // 2) proximidade em grupo (distancia media entre os pares)
+      let cohesion = 0.5; // sozinho: neutro
+      if (n >= 2) {
+        let sum = 0;
+        let pairs = 0;
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            sum += Math.hypot(alive[i].x - alive[j].x, alive[i].y - alive[j].y);
+            pairs++;
+          }
+        }
+        const avg = sum / pairs;
+        cohesion = Phaser.Math.Clamp(
+          1 -
+            (avg - TEAM_DIFFICULTY.cohesionNear) /
+              (TEAM_DIFFICULTY.cohesionFar - TEAM_DIFFICULTY.cohesionNear),
+          0,
+          1,
+        );
+      }
+      t.cohesion = Phaser.Math.Linear(t.cohesion, cohesion, a);
+
+      // 3) ruido acumulado (fracao do tempo que a equipe passa correndo)
+      const noise = Phaser.Math.Clamp(t.noise / n / interval, 0, 1);
+      t.noiseLevel = Phaser.Math.Linear(t.noiseLevel, noise, a);
+    }
+    t.dist = 0;
+    t.noise = 0;
+
+    // 4) tempo para encontrar as chaves (quanto mais rapido, maior a pontuacao)
+    const normalSecs = t.keyTimes.normal ?? t.playSeconds;
+    const masterSecs = t.keyTimes.master ?? t.playSeconds;
+    t.tempo = this.keyTempoScore((normalSecs + masterSecs) / 2);
+
+    t.efficiency =
+      TEAM_DIFFICULTY.weightProgress * t.progress +
+      TEAM_DIFFICULTY.weightCohesion * t.cohesion +
+      TEAM_DIFFICULTY.weightNoise * t.noiseLevel +
+      TEAM_DIFFICULTY.weightKeyTempo * t.tempo;
+
+    let rate = Phaser.Math.Linear(
+      TEAM_DIFFICULTY.ratePerMinuteMin,
+      TEAM_DIFFICULTY.ratePerMinuteMax,
+      Phaser.Math.Clamp(t.efficiency, 0, 1),
+    );
+
+    // muitos jogadores capturados: a pressao cresce bem mais devagar
+    const total = this.remotePlayers.size + 1;
+    if (rate > 0 && n / total <= TEAM_DIFFICULTY.lowAliveRatio) {
+      rate *= TEAM_DIFFICULTY.lowAliveGainFactor;
+    }
+
+    this.changeDifficulty((rate / 60) * interval);
+  }
+
+  updateTeamHud(time) {
+    if (time < this.teamHudAt) return;
+    this.teamHudAt = time + 400;
+
+    const lines = net.players.map((p) => {
+      if (p.id === net.myId) {
+        const state = this.localDead ? "✖" : this.ventState !== "none" ? "▫" : "●";
+        return `${p.name} ${state}`;
+      }
+      const g = this.remotePlayers.get(p.id);
+      const state = !g || g.dead || g.left ? "✖" : g.ventState !== "none" ? "▫" : "●";
+      return `${p.name} ${state}`;
+    });
+    this.teamText.setText(lines.join("\n"));
   }
 }
 

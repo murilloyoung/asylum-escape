@@ -31,26 +31,33 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
     }
   }
 
-  spawnSingleCat() {
+  // forced: { skin, x, y } vindo do host (multiplayer), para todos verem o mesmo gato.
+  spawnSingleCat(forced = null) {
     // Garantia: nunca mais de um gato vivo na cena.
     if (this.cats.length > 0) return this.cats[0];
 
-    const skin = Phaser.Utils.Array.GetRandom(CAT_SKINS);
+    const skin = forced ? forced.skin : Phaser.Utils.Array.GetRandom(CAT_SKINS);
     this.createCatAnimations(skin);
 
     // Candidatos: pontos de patrulha alcancaveis, longe do jogador e da freira.
-    const reachable = this.nav.reachable(this.player.x, this.player.y);
-    const all = ENEMY_DIFFICULTY.patrolPoints;
-    const far = all.filter(
-      (p) =>
-        this.nav.isReached(reachable, p.x, p.y) &&
-        Phaser.Math.Distance.Between(p.x, p.y, this.player.x, this.player.y) >
-          300 &&
-        Phaser.Math.Distance.Between(p.x, p.y, this.nun.x, this.nun.y) > 200,
-    );
-    const reached = all.filter((p) => this.nav.isReached(reachable, p.x, p.y));
-    const pool = far.length ? far : reached.length ? reached : all;
-    const spot = Phaser.Utils.Array.GetRandom(pool);
+    let spot;
+    if (forced) {
+      spot = { x: forced.x, y: forced.y };
+    } else {
+      const reachable = this.nav.reachable(this.player.x, this.player.y);
+      const all = ENEMY_DIFFICULTY.patrolPoints;
+      const far = all.filter(
+        (p) =>
+          this.nav.isReached(reachable, p.x, p.y) &&
+          Phaser.Math.Distance.Between(p.x, p.y, this.player.x, this.player.y) >
+            300 &&
+          Phaser.Math.Distance.Between(p.x, p.y, this.nun.x, this.nun.y) > 200,
+      );
+      const reached = all.filter((p) => this.nav.isReached(reachable, p.x, p.y));
+      const pool = far.length ? far : reached.length ? reached : all;
+      spot = Phaser.Utils.Array.GetRandom(pool);
+    }
+    this.catSetup = { skin, x: spot.x, y: spot.y };
 
     const now = this.time.now;
     const cat = this.add.container(spot.x, spot.y);
@@ -88,6 +95,9 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
     for (const door of this.doors) this.physics.add.collider(cat, door);
 
     cat.sprite.play(cat.idleAnimation);
+    cat.netTarget = { x: spot.x, y: spot.y };
+    // Cliente do multiplayer: o gato e so uma copia do que o host simula.
+    if (this.isClientMp) cat.body.enable = false;
     this.cats.push(cat);
     return cat;
   }

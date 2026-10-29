@@ -147,6 +147,7 @@ export function buildMap(scene, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS }) {
 
       scene.physics.add.existing(door, true);
 
+      door.doorIndex = scene.doors.length; // id usado para sincronizar portas no multiplayer
       door.isLocked = locked;
       door.isOpen = false;
       door.decorations = [];
@@ -256,8 +257,13 @@ export function buildMap(scene, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS }) {
     }
 
     // Sorteia a freira sobre uma célula livre, longe do ponto inicial.
-    const nunSpawn = chooseNunSpawn(scene);
+    // No multiplayer o cliente usa o ponto sorteado pelo host.
+    const setup = scene.netSetup;
+    const nunSpawn = setup ? setup.nun : chooseNunSpawn(scene);
+    scene.nunSpawnSetup = nunSpawn;
     scene.nun.setPosition(nunSpawn.x, nunSpawn.y);
+    // Cliente: a freira e so uma copia (host manda posicao e estado).
+    if (scene.isClientMp) scene.nun.body.enable = false;
     scene.nun.setDepth(scene.worldDepth(nunSpawn.y));
     scene.nunLastPos = { x: nunSpawn.x, y: nunSpawn.y };
 
@@ -291,13 +297,21 @@ export function buildMap(scene, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS }) {
           ? reachableSpots
           : keySpots
     ).slice();
-    const normalKeySpot =
-      Phaser.Utils.Array.RemoveRandomElement(availableKeySpots);
-    const masterKeySpot = availableKeySpots.length
-      ? Phaser.Utils.Array.GetRandom(availableKeySpots)
-      : normalKeySpot;
+    let normalKeySpot;
+    let masterKeySpot;
+    if (setup) {
+      normalKeySpot = setup.keys.normal;
+      masterKeySpot = setup.keys.master;
+    } else {
+      normalKeySpot = Phaser.Utils.Array.RemoveRandomElement(availableKeySpots);
+      masterKeySpot = availableKeySpots.length
+        ? Phaser.Utils.Array.GetRandom(availableKeySpots)
+        : normalKeySpot;
+    }
+    scene.keySetup = { normal: normalKeySpot, master: masterKeySpot };
+    scene.masterKeySpot = masterKeySpot;
 
-    const addCollectibleKey = (spot, texture, onCollect) => {
+    const addCollectibleKey = (spot, texture, which) => {
       const item = scene.add.image(spot.x, spot.y, texture);
       item
         .setDisplaySize(20, 42)
@@ -309,40 +323,20 @@ export function buildMap(scene, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS }) {
         duration: 4000,
         repeat: -1,
       });
+      // a logica de coleta (chaves compartilhadas pela equipe) fica em scene.collectKey
       scene.physics.add.overlap(scene.player, item, () => {
-        if (scene.gameOver || item.collected) return;
-        item.collected = true;
-        item.destroy();
-        scene.difficultyItems++;
-        scene.changeDifficulty(ENEMY_DIFFICULTY.itemGain);
-        onCollect();
+        if (scene.gameOver || item.collected || scene.localDead) return;
+        scene.collectKey(which);
       });
       return item;
     };
 
-    scene.keyItem = addCollectibleKey(normalKeySpot, "chave", () => {
-      scene.hasKey = true;
-      scene.catGuideTarget = masterKeySpot;
-      scene.normalKeyIndicator.setVisible(true);
-      scene.say(
-        "Voce encontrou a chave das portas! A freira ouviu o barulho...",
-        5000,
-      );
-      if (scene.nunState === "patrol") {
-        scene.setNunState("investigate");
-        scene.setNunDestination(scene.player.x, scene.player.y);
-      }
-    });
-    scene.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", () => {
-      scene.hasMasterKey = true;
-      scene.masterKeyIndicator.setVisible(true);
-      scene.catGuideTarget = { x: 2290, y: 1470 };
-      scene.say("Voce encontrou a chave mestra. Agora alcance a saida!", 5000);
-    });
+    scene.keyItem = addCollectibleKey(normalKeySpot, "chave", "normal");
+    scene.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", "master");
     scene.catGuideTarget = normalKeySpot;
 
-    // UM UNICO GATO POR PARTIDA
-    scene.spawnSingleCat();
+    // UM UNICO GATO POR PARTIDA (no multiplayer o cliente copia o gato do host)
+    scene.spawnSingleCat(setup ? setup.cat : null);
 
     // SAIDA
     scene.exit = scene.add.rectangle(2290, 1470, 70, 90, 0x522d2d);
@@ -353,16 +347,13 @@ export function buildMap(scene, { NavGrid, ENEMY_DIFFICULTY, VENT_PAIRS }) {
     scene.physics.add.existing(scene.exit, true);
 
     scene.physics.add.overlap(scene.player, scene.exit, () => {
-      if (scene.gameOver) return;
-
-      if (scene.hasMasterKey) {
-        scene.finish(true);
-      } else {
-        scene.say("A saida precisa da chave mestra.");
-      }
+      if (scene.gameOver || scene.localDead) return;
+      scene.onExitReached();
     });
 
-    // COLISAO COM A FREIRA
-    scene.physics.add.overlap(scene.player, scene.nun, () => scene.finish(false));
+    // COLISAO COM A FREIRA (no cliente o corpo da freira e desligado: o host decide)
+    scene.physics.add.overlap(scene.player, scene.nun, () =>
+      scene.onPlayerCaught(scene.localPlayerId()),
+    );
 
 }

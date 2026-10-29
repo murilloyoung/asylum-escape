@@ -196,32 +196,31 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
   }
 
   // a freira enxerga: alcance, cone de visao (ou muito perto) e linha de visao livre
-  nunDetectsFlashlight() {
-    if (!this.flashlightOn || this.ventState !== "none") return false;
+  // p = estado de um jogador: { x, y, running, ventState, facing, flashlightOn }
+  nunDetectsFlashlight(p) {
+    if (!p.flashlightOn || p.ventState !== "none") return false;
 
-    const dx = this.nun.x - this.player.x;
-    const dy = this.nun.y - this.player.y;
+    const dx = this.nun.x - p.x;
+    const dy = this.nun.y - p.y;
     const dist = Math.hypot(dx, dy);
     if (dist > this.lightRange) return false;
 
     const angleToNun = Math.atan2(dy, dx);
-    const diff = Math.abs(
-      Phaser.Math.Angle.Wrap(angleToNun - this.playerFacingAngle),
-    );
+    const diff = Math.abs(Phaser.Math.Angle.Wrap(angleToNun - p.facing));
     return (
       diff <= this.lightHalfAngle &&
-      this.hasLineOfSight(this.player.x, this.player.y, this.nun.x, this.nun.y)
+      this.hasLineOfSight(p.x, p.y, this.nun.x, this.nun.y)
     );
   }
 
-  nunCanSee(visionRange) {
+  nunCanSee(visionRange, p) {
     // escondido ou rastejando na ventilacao: ninguem te ve
-    if (this.ventState !== "none") return false;
+    if (p.ventState !== "none") return false;
 
     const nx = this.nun.x;
     const ny = this.nun.y;
-    const px = this.player.x;
-    const py = this.player.y;
+    const px = p.x;
+    const py = p.y;
 
     const dist = Phaser.Math.Distance.Between(nx, ny, px, py);
 
@@ -275,18 +274,88 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
     return true;
   }
 
-  onNunSpotted() {
+  onNunSpotted(fromNet = false) {
     this.say("A FREIRA TE VIU!", 2500);
     this.screamSound.play();
     this.cameras.main.shake(220, 0.006);
+    if (this.isHostMp && !fromNet) this.netBroadcast({ t: "spot" });
+  }
+
+  // Host: reacao da freira quando um jogador entra na ventilacao.
+  // p = { id, x, y, running }. Retorna "saw" | "heard" | "quiet".
+  nunReactToVentEntry(p, vent) {
+    const now = this.time.now;
+    const tune = this.adaptiveTuning;
+    const pseudo = { x: vent.x, y: vent.y, running: p.running, ventState: "none" };
+
+    // No multiplayer a perseguicao recente so conta se era perto desta ventilacao.
+    const wasChasingHere =
+      this.nunState === "chase" &&
+      now - this.nunLastSeenAt < tune.chaseMemoryMs &&
+      (!this.mp ||
+        Phaser.Math.Distance.Between(
+          this.nunLastSeen.x,
+          this.nunLastSeen.y,
+          vent.x,
+          vent.y,
+        ) < 260);
+
+    const saw =
+      this.nunCanSee(
+        tune.visionRange + (p.running ? tune.runningVisionBonus : 0),
+        pseudo,
+      ) || wasChasingHere;
+
+    if (saw) {
+      this.nunHunt = {
+        playerId: p.id,
+        stage: "toEntry",
+        entry: { pair: vent.pair, side: vent.side },
+        target: { x: vent.x, y: vent.y },
+        expireAt: now + tune.ventHuntMs,
+      };
+      this.setNunState("ventHunt");
+      this.nunRepathAt = 0;
+      return "saw";
+    }
+
+    if (this.makeNoise(vent.x, vent.y, tune.hearingRange)) return "heard";
+    return "quiet";
   }
 
   updateNun(now, delta) {
     const nun = this.nun;
     const tune = this.adaptiveTuning;
-    const px = this.player.x;
-    const py = this.player.y;
-    const dist = Phaser.Math.Distance.Between(nun.x, nun.y, px, py);
+    const players = this.getPlayerStates();
+
+    // PERCEPCAO POR JOGADOR: a freira persegue o jogador visivel mais proximo.
+    let seen = null;
+    let seenDist = Infinity;
+    let heard = null;
+    let heardDist = Infinity;
+    let dist = Infinity; // jogador mais proximo (para avisos e portas)
+
+    for (const p of players) {
+      const d = Phaser.Math.Distance.Between(nun.x, nun.y, p.x, p.y);
+      if (d < dist) dist = d;
+
+      const range =
+        tune.visionRange + (p.running ? tune.runningVisionBonus : 0);
+      if ((this.nunCanSee(range, p) || this.nunDetectsFlashlight(p)) && d < seenDist) {
+        seen = p;
+        seenDist = d;
+      }
+
+      if (
+        p.running &&
+        p.ventState === "none" &&
+        d <= tune.hearingRange &&
+        d < heardDist
+      ) {
+        heard = p;
+        heardDist = d;
+      }
+    }
 
     const wanderSpeed = tune.wanderSpeed;
     const investigateSpeed = tune.investigateSpeed;
@@ -304,15 +373,8 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
       }
     }
 
-    // PERCEPCAO
-    const visionRange =
-      tune.visionRange + (this.playerRunning ? tune.runningVisionBonus : 0);
-    const seesPlayer =
-      this.nunCanSee(visionRange) || this.nunDetectsFlashlight();
-    const heardPlayer =
-      this.playerRunning &&
-      this.ventState === "none" &&
-      dist <= tune.hearingRange;
+    const seesPlayer = !!seen;
+    const heardPlayer = !!heard;
 
     if (seesPlayer) {
       if (this.nunState !== "chase") {
@@ -323,19 +385,19 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
 
       this.nunHunt = null;
       this.setNunState("chase");
-      this.nunLastSeen = { x: px, y: py };
+      this.nunLastSeen = { x: seen.x, y: seen.y };
       this.nunLastSeenAt = now;
     } else if (this.nunState === "chase") {
       // perdeu o jogador de vista: vai ate onde viu por ultimo e procura
       if (now - this.nunLastSeenAt > tune.chaseMemoryMs) {
         this.difficultyEscapes++;
-        this.changeDifficulty(ENEMY_DIFFICULTY.escapeGain);
+        this.eventDifficulty(ENEMY_DIFFICULTY.escapeGain);
         if (
           !this.nunNearMissCounted &&
           now - this.nunChaseStartedAt >= ENEMY_DIFFICULTY.chaseEndNearMissMs
         ) {
           this.difficultyNearMisses++;
-          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
+          this.eventDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
         }
         this.setNunState("search");
         this.nunSearchUntil = 0;
@@ -343,13 +405,13 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
       }
     } else if (heardPlayer && this.nunState === "patrol") {
       this.setNunState("investigate");
-      this.setNunDestination(px, py);
+      this.setNunDestination(heard.x, heard.y);
     }
 
     // COMPORTAMENTO POR ESTADO
     switch (this.nunState) {
       case "chase": {
-        const target = seesPlayer ? { x: px, y: py } : this.nunLastSeen;
+        const target = seesPlayer ? { x: seen.x, y: seen.y } : this.nunLastSeen;
 
         if (now >= this.nunRepathAt) {
           this.setNunDestination(target.x, target.y);
@@ -358,12 +420,12 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
 
         if (
           seesPlayer &&
-          dist <= ENEMY_DIFFICULTY.nearMissDistance &&
+          seenDist <= ENEMY_DIFFICULTY.nearMissDistance &&
           !this.nunNearMissCounted
         ) {
           this.nunNearMissCounted = true;
           this.difficultyNearMisses++;
-          this.changeDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
+          this.eventDifficulty(-ENEMY_DIFFICULTY.nearMissLoss);
         }
         this.moveNunAdaptive(chaseSpeed, target);
         break;
@@ -396,17 +458,28 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
 
         if (dTarget < 36 || (dTarget < 80 && this.nunArrived())) {
           if (h.stage === "toEntry") {
+            const hunted = players.find((q) => q.id === h.playerId);
             const inside =
-              this.ventState === "hidden" &&
-              this.ventAt &&
-              this.ventAt.pair === h.entry.pair &&
-              this.ventAt.side === h.entry.side;
+              hunted &&
+              hunted.ventState === "hidden" &&
+              hunted.ventAt &&
+              hunted.ventAt.pair === h.entry.pair &&
+              hunted.ventAt.side === h.entry.side;
 
             if (inside) {
-              this.finish(
-                false,
-                "A freira puxou você para fora da ventilação!",
-              );
+              const message = "A freira puxou você para fora da ventilação!";
+              if (!this.mp) {
+                this.finish(false, message);
+                break;
+              }
+              // multiplayer: so esse jogador cai; a freira volta a procurar
+              this.onPlayerCaught(h.playerId, message);
+              this.nunHunt = null;
+              this.setNunState("search");
+              this.nunWaitUntil = now + tune.patrolWaitMs;
+              this.nunSearchUntil = now + tune.searchDurationMs;
+              this.nunDest = null;
+              this.stopNun();
               break;
             }
 
