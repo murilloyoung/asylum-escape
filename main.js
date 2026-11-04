@@ -1132,6 +1132,10 @@ class AsylumScene extends Phaser.Scene {
 
     if (which === "normal") {
       this.hasKey = true;
+      if (this.masterKeyItem && !this.masterKeyItem.collected) {
+        this.masterKeyItem.setVisible(true);
+        this.masterKeyItem.body.enable = true;
+      }
       this.catGuideTarget = this.masterKeySpot;
       this.normalKeyIndicator.setVisible(true);
       this.say(

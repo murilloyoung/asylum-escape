@@ -8,7 +8,8 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const MAX_PLAYERS = 4;
 
 function iceServers() {
-  if (Array.isArray(window.ASYLUM_ICE_SERVERS)) return window.ASYLUM_ICE_SERVERS;
+  if (Array.isArray(window.ASYLUM_ICE_SERVERS))
+    return window.ASYLUM_ICE_SERVERS;
   return [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
@@ -38,11 +39,15 @@ export function cleanName(name) {
 
 function friendly(err) {
   const type = err && err.type;
-  if (type === "peer-unavailable") return "Sala não encontrada. Confira o código.";
-  if (["network", "server-error", "socket-error", "socket-closed"].includes(type)) {
+  if (type === "peer-unavailable")
+    return "Sala não encontrada. Confira o código.";
+  if (
+    ["network", "server-error", "socket-error", "socket-closed"].includes(type)
+  ) {
     return "Não foi possível falar com o servidor de conexão. Tente de novo.";
   }
-  if (type === "browser-incompatible") return "Seu navegador não suporta WebRTC.";
+  if (type === "browser-incompatible")
+    return "Seu navegador não suporta WebRTC.";
   return (err && err.message) || "Erro de conexão.";
 }
 
@@ -112,6 +117,11 @@ class Net {
         this.peer = peer;
 
         peer.on("open", () => {
+          // CORRIGIDO: o PeerJS emite "open" de novo apos peer.reconnect().
+          // Sem esta guarda, bindHost registrava os handlers em dobro e
+          // cada "hello" criava dois jogadores para um unico cliente.
+          if (this.code) return;
+
           this.code = code;
           this.bindHost(peer);
           resolve(code);
@@ -202,7 +212,9 @@ class Net {
 
     this.myName = cleanName(name);
     this.role = "client";
-    const roomCode = String(code || "").trim().toUpperCase();
+    const roomCode = String(code || "")
+      .trim()
+      .toUpperCase();
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -305,7 +317,12 @@ class Net {
     this.reset();
 
     try {
-      for (const conn of conns) conn.close();
+      for (const conn of conns) {
+        // CORRIGIDO: sem isso, o "close" de cada conexao caia em hostDrop
+        // e emitia "playerleft"/"lobby" falsos enquanto a sala era desmontada.
+        conn.playerId = null;
+        conn.close();
+      }
       if (hostConn) hostConn.close();
       if (peer) peer.destroy();
     } catch (error) {

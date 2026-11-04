@@ -23,7 +23,12 @@ const CAT_ANIM_LAYOUT = {
 // Escolhe para onde o gato foge. Tenta primeiro direto para longe da freira;
 // se esse destino nao tem caminho (parede, canto), tenta angulos vizinhos.
 function pickFleeRoute(scene, cat) {
-  const base = Phaser.Math.Angle.Between(scene.nun.x, scene.nun.y, cat.x, cat.y);
+  const base = Phaser.Math.Angle.Between(
+    scene.nun.x,
+    scene.nun.y,
+    cat.x,
+    cat.y,
+  );
   let fallback = null;
 
   for (const offset of CAT_FLEE_ANGLE_OFFSETS) {
@@ -74,15 +79,23 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
 
     // forced: { skin, x, y } vindo do host (multiplayer), para todos verem o mesmo gato.
     spawnSingleCat(forced = null) {
-      // Garantias de estado: sem isso, `this.cats.length` quebrava se a lista nao existisse
-      // e `now >= undefined` deixava os miados/arranhoes mudos para sempre.
       if (!this.cats) this.cats = [];
-      if (this.catSoundCooldown === undefined) this.catSoundCooldown = 0;
+
+      // CORRIGIDO: ao reiniciar a partida a instancia da cena e reaproveitada e this.cats
+      // continuava com o gato da partida anterior (ja destruido). A checagem de "ja existe
+      // um gato" devolvia esse gato morto e nenhum gato novo era criado.
+      this.cats = this.cats.filter((c) => c.active);
 
       // Nunca mais de um gato vivo na cena.
       if (this.cats.length > 0) return this.cats[0];
 
-      const skin = forced ? forced.skin : Phaser.Utils.Array.GetRandom(CAT_SKINS);
+      // CORRIGIDO: o cooldown guarda um instante de this.time.now, que volta a zero quando
+      // a cena reinicia. Um valor antigo (ex.: 300000) deixava o gato mudo por minutos.
+      this.catSoundCooldown = 0;
+
+      const skin = forced
+        ? forced.skin
+        : Phaser.Utils.Array.GetRandom(CAT_SKINS);
       this.createCatAnimations(skin);
 
       // Candidatos: pontos de patrulha alcancaveis, longe do jogador e da freira.
@@ -92,7 +105,7 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
       } else {
         const dist = Phaser.Math.Distance.Between;
         const reachable = this.nav.reachable(this.player.x, this.player.y);
-        const all = ENEMY_DIFFICULTY.patrolPoints;
+        const all = ENEMY_DIFFICULTY.patrolPoints || [];
         const reached = all.filter((p) =>
           this.nav.isReached(reachable, p.x, p.y),
         );
@@ -102,7 +115,16 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
             dist(p.x, p.y, this.nun.x, this.nun.y) > 200,
         );
         const pool = far.length ? far : reached.length ? reached : all;
-        spot = Phaser.Utils.Array.GetRandom(pool);
+
+        if (pool.length) {
+          spot = Phaser.Utils.Array.GetRandom(pool);
+        } else {
+          // CORRIGIDO: sem pontos de patrulha, GetRandom devolvia null e o spawn quebrava.
+          console.warn(
+            "[cat] sem pontos de patrulha; gato nasce perto do jogador",
+          );
+          spot = { x: this.player.x + 120, y: this.player.y };
+        }
       }
       this.catSetup = { skin, x: spot.x, y: spot.y };
 
@@ -151,6 +173,9 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
 
     updateCats(now) {
       for (const cat of this.cats) {
+        // CORRIGIDO: ignora gato destruido (reinicio de partida) em vez de quebrar no cat.body.
+        if (!cat.active || !cat.body) continue;
+
         cat.setDepth(this.worldDepth(cat.y));
 
         const distanceToNun = Phaser.Math.Distance.Between(
@@ -181,7 +206,7 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
           playerCanHearCat &&
           now >= this.catSoundCooldown
         ) {
-          this.catAngrySound.play();
+          this.catAngrySound?.play();
           this.catSoundCooldown = now + 900;
           cat.angryPlayed = true;
         }
@@ -190,7 +215,7 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
 
         if (!fleeing && now >= cat.meowAt) {
           if (playerCanHearCat && now >= this.catSoundCooldown) {
-            this.catMeowSound.play();
+            this.catMeowSound?.play();
             this.catSoundCooldown = now + 500;
             cat.meowAt = now + Phaser.Math.Between(7000, 13000);
           } else {
@@ -222,7 +247,7 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
         if (atGuide) {
           cat.body.setVelocity(0, 0);
           if (!cat.scratchPlaying && now >= cat.scratchAt) {
-            if (playerCanHearCat) this.catScratchSound.play();
+            if (playerCanHearCat) this.catScratchSound?.play();
             cat.scratchPlaying = true;
             cat.sprite.play(cat.scratchAnimation);
             cat.scratchAt = now + Phaser.Math.Between(9000, 16000);
@@ -269,7 +294,12 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
           cat.sprite.play(moveAnimation);
         }
 
-        const angle = Phaser.Math.Angle.Between(cat.x, cat.y, target.x, target.y);
+        const angle = Phaser.Math.Angle.Between(
+          cat.x,
+          cat.y,
+          target.x,
+          target.y,
+        );
         const speed = fleeing ? CAT_FLEE_SPEED : CAT_WALK_SPEED;
         const vx = Math.cos(angle) * speed;
         cat.body.setVelocity(vx, Math.sin(angle) * speed);
@@ -283,6 +313,7 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
       if (playerSpeed < 25) return false;
 
       return this.cats.some((cat) => {
+        if (!cat.active || !cat.body) return false;
         if (this.time.now < cat.fleeUntil) return false;
         const catSpeed = Math.hypot(cat.body.velocity.x, cat.body.velocity.y);
         if (catSpeed < 20) return false;

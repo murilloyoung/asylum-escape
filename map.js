@@ -411,6 +411,9 @@ export function buildMap(scene, { NavGrid, VENT_PAIRS }) {
 
   scene.keyItem = addCollectibleKey(normalKeySpot, "chave", "normal");
   scene.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", "master");
+  // A chave mestra so pode ser vista/coletada depois da chave comum.
+  scene.masterKeyItem.setVisible(false);
+  scene.masterKeyItem.body.enable = false;
   scene.catGuideTarget = normalKeySpot;
 
   // UM UNICO GATO POR PARTIDA (no multiplayer o cliente copia o gato do host)
