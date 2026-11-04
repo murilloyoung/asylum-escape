@@ -1898,6 +1898,7 @@ class AsylumScene extends Phaser.Scene {
 
     this.input.keyboard.addCapture("F3");
     this.input.keyboard.on("keydown-F3", () => this.toggleEnemyDebug());
+    this.input.keyboard.on("keydown-ESC", () => this.leaveMatch());
     this.input.keyboard.on("keydown", (event) =>
       this.handleDebugCommandKey(event),
     );
@@ -1926,6 +1927,15 @@ class AsylumScene extends Phaser.Scene {
   }
 
   handleDebugCommandKey(event) {
+    if (event.key === "Escape") {
+      if (this.debugCommandFocused) {
+        this.debugCommand = "";
+        this.debugCommandFocused = false;
+        this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
+        this.updateDebugCommandBar();
+      }
+      return;
+    }
     if (!this.debugEnemyAI || !this.debugCommandFocused || event.code === "F3")
       return;
     event.preventDefault();
@@ -1982,14 +1992,17 @@ class AsylumScene extends Phaser.Scene {
 
     if (event.key === "Backspace") {
       this.debugCommand = this.debugCommand.slice(0, -1);
-    } else if (event.key === "Escape") {
-      this.debugCommand = "";
-      this.debugCommandFocused = false;
-      this.debugCommandMessage = "Clique aqui para digitar; Enter executa.";
     } else if (event.key.length === 1 && /^[a-z0-9 ._-]$/i.test(event.key)) {
       this.debugCommand += event.key;
     }
     this.updateDebugCommandBar();
+  }
+
+  leaveMatch() {
+    if (net.lobbyOpen) return;
+    if (this.mp) net.leave();
+    lobby.close();
+    this.scene.restart();
   }
 
   drawEnemyDebug(now, force = false) {
