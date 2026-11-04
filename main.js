@@ -1740,6 +1740,7 @@ class AsylumScene extends Phaser.Scene {
     ctx.globalCompositeOperation = "destination-out";
 
     let core = null;
+    const remoteCores = [];
 
     if (!inVent && this.flashlightOn) {
       // CONE LARGO E SUAVE (penumbra) E CONE CENTRAL FORTE
@@ -1763,6 +1764,34 @@ class AsylumScene extends Phaser.Scene {
       this.carveLight(sx, sy, core, range, 8, 1);
     }
 
+    // As lanternas dos outros jogadores iluminam o mesmo cenário visto pelo cliente.
+    if (this.mp) {
+      for (const g of this.remotePlayers.values()) {
+        if (g.dead || g.left || g.ventState !== "none" || !g.flashlightOn)
+          continue;
+        const gx = g.container.x - camera.scrollX;
+        const gy = g.container.y - camera.scrollY;
+        const remoteRange = this.lightRange * flicker;
+        const remoteCore = this.buildVisibility(
+          g.facing,
+          this.lightHalfAngle,
+          remoteRange,
+          this.lightRayCount,
+          camera,
+        );
+        const remoteSoft = this.buildVisibility(
+          g.facing,
+          this.lightHalfAngle * 1.35,
+          remoteRange * 0.92,
+          60,
+          camera,
+        );
+        this.carveLight(gx, gy, remoteSoft, remoteRange * 0.92, 8, 0.5);
+        this.carveLight(gx, gy, remoteCore, remoteRange, 8, 1);
+        remoteCores.push({ x: gx, y: gy, points: remoteCore, range: remoteRange });
+      }
+    }
+
     this.carveLight(
       sx,
       sy,
@@ -1775,6 +1804,9 @@ class AsylumScene extends Phaser.Scene {
     // TOM QUENTE DA LANTERNA
     ctx.globalCompositeOperation = "source-over";
     if (core) this.tintLight(sx, sy, core, range);
+    for (const light of remoteCores) {
+      this.tintLight(light.x, light.y, light.points, light.range);
+    }
 
     this.darkTexture.refresh();
   }
