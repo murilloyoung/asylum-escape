@@ -2,7 +2,7 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta property="og:image" content="capa.png" />
 
     <title>Asylum Escape</title>
@@ -13,25 +13,36 @@
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.min.js"></script>
     <!-- PeerJS: conexao P2P (WebRTC) para o multiplayer, funciona no GitHub Pages -->
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-    <script type="module" src="main.js"></script>
+    <script type="module" src="src/main.js"></script>
   </head>
 
   <body>
     <main id="game"></main>
 
     <div id="help">
-      WASD / SETAS: mover · SHIFT: correr · MOUSE: mirar lanterna · F: ligar/desligar lanterna · E: portas e ventilações · ESPAÇO: rastejar · Encontre as chaves e escape!
+      WASD / SETAS: mover · SHIFT: correr · MOUSE: mirar lanterna · F:
+      ligar/desligar lanterna · E: portas e ventilações · ESPAÇO: rastejar ·
+      Encontre as chaves e escape!
     </div>
 
     <!-- LOBBY MULTIPLAYER -->
-    <div id="mp-lobby" class="mp-hidden" role="dialog" aria-modal="true" aria-label="Multiplayer">
+    <div
+      id="mp-lobby"
+      class="mp-hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Multiplayer">
       <div class="mp-card">
         <h2>MULTIPLAYER</h2>
 
         <section id="mp-home">
           <label>
             SEU APELIDO
-            <input id="mp-name" maxlength="12" autocomplete="off" placeholder="Jogador" />
+            <input
+              id="mp-name"
+              maxlength="12"
+              autocomplete="off"
+              placeholder="Jogador" />
           </label>
           <button id="mp-create" type="button">CRIAR SALA</button>
 
@@ -39,10 +50,16 @@
 
           <label>
             CÓDIGO DA SALA
-            <input id="mp-code" maxlength="5" autocomplete="off" placeholder="ABC12" />
+            <input
+              id="mp-code"
+              maxlength="5"
+              autocomplete="off"
+              placeholder="ABC12" />
           </label>
           <button id="mp-join" type="button">ENTRAR EM SALA</button>
-          <button id="mp-back" type="button" class="mp-secondary">VOLTAR</button>
+          <button id="mp-back" type="button" class="mp-secondary">
+            VOLTAR
+          </button>
         </section>
 
         <section id="mp-room" class="mp-hidden">
@@ -53,8 +70,12 @@
           </div>
           <ul id="mp-players"></ul>
           <p id="mp-room-hint"></p>
-          <button id="mp-start" type="button" class="mp-hidden">INICIAR PARTIDA</button>
-          <button id="mp-leave" type="button" class="mp-secondary">SAIR DA SALA</button>
+          <button id="mp-start" type="button" class="mp-hidden">
+            INICIAR PARTIDA
+          </button>
+          <button id="mp-leave" type="button" class="mp-secondary">
+            SAIR DA SALA
+          </button>
         </section>
 
         <p id="mp-status" role="status"></p>

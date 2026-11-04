@@ -100,7 +100,8 @@ export function installPlayerMethods(Scene) {
       // MIRA DA LANTERNA: mouse (se mexeu recentemente) ou direcao do movimento
       let targetAngle = null;
 
-      if (!moving || time - this.lastPointerMoveAt < 2500) {
+      // no celular a lanterna segue o joystick de mira / a direcao do movimento (sem mouse)
+      if (!this.mobileControls && (!moving || time - this.lastPointerMoveAt < 2500)) {
         const pointer = this.input.activePointer;
         const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
 
@@ -115,6 +116,8 @@ export function installPlayerMethods(Scene) {
           );
         }
       }
+
+      if (this.mobileAimAngle != null) targetAngle = this.mobileAimAngle;
 
       if (targetAngle === null && moving) targetAngle = Math.atan2(dy, dx);
 

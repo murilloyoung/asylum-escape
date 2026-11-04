@@ -4,6 +4,7 @@ import { installCatMethods, CAT_AI_DIFFICULTY } from "./cat.js";
 import { installPlayerMethods } from "./player.js";
 import { net } from "./net.js";
 import { initLobby } from "./lobby.js";
+import { attachMobileControls, isMobile, gameSize } from "./mobile.js";
 
 // ==== MULTIPLAYER: AJUSTES (valores faceis de mexer) ====
 const NET_SEND_MS = 66; // ~15 envios por segundo
@@ -28,7 +29,9 @@ const TEAM_DIFFICULTY = {
 
 // O lobby (HTML) fica fora da cena para sobreviver aos reinicios.
 let activeScene = null;
-const lobby = initLobby({ onStart: () => activeScene?.startMultiplayerAsHost() });
+const lobby = initLobby({
+  onStart: () => activeScene?.startMultiplayerAsHost(),
+});
 
 // ==== NAV START ====
 // GRADE DE NAVEGACAO (sem dependencia do Phaser)
@@ -461,14 +464,17 @@ class AsylumScene extends Phaser.Scene {
     this.load.image("insideTiles", "assets/mapa/Inside_C.png");
     this.load.image("chave", "assets/mapa/itens/chave.png");
     this.load.image("chaveMestra", "assets/mapa/itens/chaveMestra.png");
-    this.load.audio("passos", "assets/audios/passos.mp3");
-    this.load.audio("corrida", "assets/audios/corrida.mp3");
-    this.load.audio("gritoFreira", "assets/audios/gritoFeira.mp3");
-    this.load.audio("ambiente", "assets/audios/ambiente.mp3");
-    this.load.audio("chase", "assets/audios/chase.mp3");
-    this.load.audio("catMeow", "assets/audios/gatos/gatomiando.mp3");
-    this.load.audio("catAngry", "assets/audios/gatos/gatobravo.mp3");
-    this.load.audio("catScratch", "assets/audios/gatos/gatoarranhando.mp3");
+    this.load.audio("ambiente", "assets/mapa/audios/ambiente.mp3");
+
+    this.load.audio("passos", "assets/personagens/player/audios/passos.mp3");
+    this.load.audio("corrida", "assets/personagens/player/audios/corrida.mp3");
+
+    this.load.audio("gritoFreira", "assets/personagens/freira/audios/gritoFeira.mp3");
+    this.load.audio("chase", "assets/personagens/freira/audios/chase.mp3");
+
+    this.load.audio("catMeow", "assets/personagens/gatos/audios/gatomiando.mp3");
+    this.load.audio("catAngry", "assets/personagens/gatos/audios/gatobravo.mp3");
+    this.load.audio("catScratch", "assets/personagens/gatos/audios/gatoarranhando.mp3");
   }
 
   create() {
@@ -621,6 +627,7 @@ class AsylumScene extends Phaser.Scene {
     this.keys = this.input.keyboard.addKeys(
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,F,SPACE",
     );
+    attachMobileControls(this); // celular: joystick e botoes viram teclas
 
     // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
     this.hotbar = this.add.graphics().setScrollFactor(0).setDepth(99);
@@ -734,7 +741,7 @@ class AsylumScene extends Phaser.Scene {
       .setDepth(100);
 
     this.doorHint = this.add
-      .text(480, 458, "", {
+      .text(this.scale.width / 2, 458, "", {
         fontSize: "16px",
         align: "center",
         color: "#ffffff",
@@ -798,7 +805,11 @@ class AsylumScene extends Phaser.Scene {
       return object;
     };
 
-    add(this.add.rectangle(480, 280, 960, 560, 0x08090c, 0.96));
+    // telas mais largas que 960: o menu (desenhado para 960) fica centralizado e o fundo cobre tudo
+    menu.x = Math.round((this.scale.width - 960) / 2);
+    add(
+      this.add.rectangle(480, 280, this.scale.width + 200, 560, 0x08090c, 0.96),
+    );
     add(this.add.rectangle(52, 280, 4, 430, 0x9c3434));
 
     add(
@@ -832,14 +843,24 @@ class AsylumScene extends Phaser.Scene {
     );
     const startPrompt = add(
       this.add
-        .text(276, 395, "APERTE ESPAÇO PARA INICIAR", {
-          fontFamily: "Arial",
-          fontSize: "17px",
-          fontStyle: "bold",
-          color: "#f1e6ce",
-        })
+        .text(
+          276,
+          395,
+          isMobile ? "TOCAR PARA JOGAR" : "APERTE ESPAÇO PARA INICIAR",
+          {
+            fontFamily: "Arial",
+            fontSize: "17px",
+            fontStyle: "bold",
+            color: "#f1e6ce",
+          },
+        )
         .setOrigin(0.5),
     );
+    // celular: o proprio botao do menu inicia a partida
+    if (isMobile) {
+      startFrame.setInteractive();
+      startFrame.on("pointerdown", () => this.onSpacePressed());
+    }
     this.tweens.add({
       targets: [startFrame, startPrompt],
       alpha: { from: 0.72, to: 1 },
@@ -1126,7 +1147,8 @@ class AsylumScene extends Phaser.Scene {
     item.destroy();
 
     if (this.mp) {
-      if (this.isHostMp) net.broadcast({ t: "key", which }, opts.fromId ?? null);
+      if (this.isHostMp)
+        net.broadcast({ t: "key", which }, opts.fromId ?? null);
       else if (!opts.fromNet) net.sendToHost({ t: "key", which });
     }
 
@@ -1792,7 +1814,12 @@ class AsylumScene extends Phaser.Scene {
         );
         this.carveLight(gx, gy, remoteSoft, remoteRange * 0.92, 8, 0.5);
         this.carveLight(gx, gy, remoteCore, remoteRange, 8, 1);
-        remoteCores.push({ x: gx, y: gy, points: remoteCore, range: remoteRange });
+        remoteCores.push({
+          x: gx,
+          y: gy,
+          points: remoteCore,
+          range: remoteRange,
+        });
       }
     }
 
@@ -2242,12 +2269,19 @@ class AsylumScene extends Phaser.Scene {
     this.physics.pause();
 
     this.add
-      .rectangle(480, this.mp ? 300 : 280, 520, this.mp ? 300 : 230, 0x080808, 0.97)
+      .rectangle(
+        this.scale.width / 2,
+        this.mp ? 300 : 280,
+        520,
+        this.mp ? 300 : 230,
+        0x080808,
+        0.97,
+      )
       .setScrollFactor(0)
       .setDepth(200);
 
     this.add
-      .text(480, 225, won ? "VOCÊ ESCAPOU" : "FIM DE JOGO", {
+      .text(this.scale.width / 2, 225, won ? "VOCÊ ESCAPOU" : "FIM DE JOGO", {
         fontFamily: "Georgia",
         fontSize: "30px",
         color: won ? "#d8c18a" : "#d34b4b",
@@ -2258,7 +2292,7 @@ class AsylumScene extends Phaser.Scene {
 
     this.add
       .text(
-        480,
+        this.scale.width / 2,
         275,
         message ||
           (won
@@ -2277,13 +2311,18 @@ class AsylumScene extends Phaser.Scene {
     if (this.isClientMp) return; // cliente espera o host iniciar outra partida
 
     const restartButton = this.add
-      .text(480, 335, this.mp ? "⟳  NOVA PARTIDA" : "⟳  RECOMEÇAR", {
-        fontFamily: "Arial",
-        fontSize: "20px",
-        color: "#ffffff",
-        backgroundColor: "#762d2d",
-        padding: { x: 22, y: 12 },
-      })
+      .text(
+        this.scale.width / 2,
+        335,
+        this.mp ? "⟳  NOVA PARTIDA" : "⟳  RECOMEÇAR",
+        {
+          fontFamily: "Arial",
+          fontSize: "20px",
+          color: "#ffffff",
+          backgroundColor: "#762d2d",
+          padding: { x: 22, y: 12 },
+        },
+      )
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(202)
@@ -2311,17 +2350,22 @@ class AsylumScene extends Phaser.Scene {
   createMultiplayerEndButtons() {
     if (this.isClientMp) {
       this.add
-        .text(480, 335, "Aguardando o host iniciar uma nova partida...", {
-          fontSize: "15px",
-          color: "#aaa69d",
-        })
+        .text(
+          this.scale.width / 2,
+          335,
+          "Aguardando o host iniciar uma nova partida...",
+          {
+            fontSize: "15px",
+            color: "#aaa69d",
+          },
+        )
         .setOrigin(0.5)
         .setScrollFactor(0)
         .setDepth(202);
     }
 
     const leave = this.add
-      .text(480, 400, "SAIR DA SALA", {
+      .text(this.scale.width / 2, 400, "SAIR DA SALA", {
         fontFamily: "Arial",
         fontSize: "15px",
         color: "#cccccc",
@@ -2439,7 +2483,11 @@ class AsylumScene extends Phaser.Scene {
     g.left = true;
     g.container.setVisible(false);
     if (this.mpWaiting) this.mpWaiting.delete(id);
-    if (!this.gameOver && this.gameStarted && this.getPlayerStates().length === 0) {
+    if (
+      !this.gameOver &&
+      this.gameStarted &&
+      this.getPlayerStates().length === 0
+    ) {
       this.finish(false, "Toda a equipe foi capturada...");
     }
   }
@@ -2559,10 +2607,16 @@ class AsylumScene extends Phaser.Scene {
 
       const dx = g.target.x - g.container.x;
       const dy = g.target.y - g.container.y;
-      if (Math.hypot(dx, dy) > 250) g.container.setPosition(g.target.x, g.target.y);
-      else g.container.setPosition(g.container.x + dx * k, g.container.y + dy * k);
+      if (Math.hypot(dx, dy) > 250)
+        g.container.setPosition(g.target.x, g.target.y);
+      else
+        g.container.setPosition(g.container.x + dx * k, g.container.y + dy * k);
 
-      if (g.anim && g.sprite.anims.currentAnim?.key !== g.anim && this.anims.exists(g.anim)) {
+      if (
+        g.anim &&
+        g.sprite.anims.currentAnim?.key !== g.anim &&
+        this.anims.exists(g.anim)
+      ) {
         g.sprite.play(g.anim);
       }
     }
@@ -2574,7 +2628,8 @@ class AsylumScene extends Phaser.Scene {
     if (this.nunNetTarget) {
       const dx = this.nunNetTarget.x - this.nun.x;
       const dy = this.nunNetTarget.y - this.nun.y;
-      if (Math.hypot(dx, dy) > 250) this.nun.setPosition(this.nunNetTarget.x, this.nunNetTarget.y);
+      if (Math.hypot(dx, dy) > 250)
+        this.nun.setPosition(this.nunNetTarget.x, this.nunNetTarget.y);
       else this.nun.setPosition(this.nun.x + dx * k, this.nun.y + dy * k);
       this.nun.setDepth(this.worldDepth(this.nun.y));
     }
@@ -2816,7 +2871,11 @@ class AsylumScene extends Phaser.Scene {
 
     if (n > 0) {
       // 1) velocidade media de progressao (px/s por jogador, relativo a corrida)
-      const progress = Phaser.Math.Clamp(t.dist / n / interval / this.runSpeed, 0, 1);
+      const progress = Phaser.Math.Clamp(
+        t.dist / n / interval / this.runSpeed,
+        0,
+        1,
+      );
       t.progress = Phaser.Math.Linear(t.progress, progress, a);
 
       // 2) proximidade em grupo (distancia media entre os pares)
@@ -2880,11 +2939,16 @@ class AsylumScene extends Phaser.Scene {
 
     const lines = net.players.map((p) => {
       if (p.id === net.myId) {
-        const state = this.localDead ? "✖" : this.ventState !== "none" ? "▫" : "●";
+        const state = this.localDead
+          ? "✖"
+          : this.ventState !== "none"
+            ? "▫"
+            : "●";
         return `${p.name} ${state}`;
       }
       const g = this.remotePlayers.get(p.id);
-      const state = !g || g.dead || g.left ? "✖" : g.ventState !== "none" ? "▫" : "●";
+      const state =
+        !g || g.dead || g.left ? "✖" : g.ventState !== "none" ? "▫" : "●";
       return `${p.name} ${state}`;
     });
     this.teamText.setText(lines.join("\n"));
@@ -2899,7 +2963,7 @@ installPlayerMethods(AsylumScene);
 const config = {
   type: Phaser.AUTO,
   parent: "game",
-  width: 960,
+  width: isMobile ? gameSize.width : 960,
   height: 560,
   backgroundColor: "#11110f",
 
@@ -2912,7 +2976,8 @@ const config = {
 
   scale: {
     // Mantem o espaco logico usado pelo HUD e pelos menus; o CSS amplia a tela.
-    mode: Phaser.Scale.NONE,
+    mode: isMobile ? gameSize.mode : Phaser.Scale.NONE,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
   },
 
   scene: [AsylumScene],
