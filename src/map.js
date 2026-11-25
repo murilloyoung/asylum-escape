@@ -107,7 +107,11 @@ export function generateMapLayout() {
 // No multiplayer o cliente usa exatamente o que o host sorteou (setup.keys).
 function pickKeySpots(scene, setup) {
   if (setup) {
-    return { normal: setup.keys.normal, master: setup.keys.master };
+    return {
+      normal: setup.keys.normal,
+      master: setup.keys.master,
+      crowbar: setup.keys.crowbar || setup.keys.master,
+    };
   }
 
   const keySpots = scene.mapLayout.keySpots;
@@ -131,10 +135,13 @@ function pickKeySpots(scene, setup) {
   const available = (farSpots.length ? farSpots : basePool).slice();
   const normal = Phaser.Utils.Array.RemoveRandomElement(available);
   const master = available.length
-    ? Phaser.Utils.Array.GetRandom(available)
+    ? Phaser.Utils.Array.RemoveRandomElement(available)
+    : normal;
+  const crowbar = available.length
+    ? Phaser.Utils.Array.RemoveRandomElement(available)
     : normal;
 
-  return { normal, master };
+  return { normal, master, crowbar };
 }
 
 export function buildMap(scene, { NavGrid, VENT_PAIRS }) {
@@ -382,17 +389,20 @@ export function buildMap(scene, { NavGrid, VENT_PAIRS }) {
   scene.nunLastPos = { x: nunSpawn.x, y: nunSpawn.y };
 
   // CHAVES EM LOCAIS ALEATORIOS (sempre alcancaveis sem passar por porta trancada)
-  const { normal: normalKeySpot, master: masterKeySpot } = pickKeySpots(
-    scene,
-    setup,
-  );
-  scene.keySetup = { normal: normalKeySpot, master: masterKeySpot };
+  const keySpots = pickKeySpots(scene, setup);
+  scene.keySetup = keySpots;
+  const {
+    normal: normalKeySpot,
+    master: masterKeySpot,
+    crowbar: crowbarSpot,
+  } = keySpots;
+  scene.crowbarSpot = crowbarSpot;
   scene.masterKeySpot = masterKeySpot;
 
-  const addCollectibleKey = (spot, texture, which) => {
+  const addCollectible = (spot, texture, which, width, height) => {
     const item = scene.add.image(spot.x, spot.y, texture);
     item
-      .setDisplaySize(20, 42)
+      .setDisplaySize(width, height)
       .setDepth(scene.worldDepth(spot.y + item.displayHeight / 2));
     scene.physics.add.existing(item, true);
     scene.tweens.add({
@@ -409,8 +419,21 @@ export function buildMap(scene, { NavGrid, VENT_PAIRS }) {
     return item;
   };
 
-  scene.keyItem = addCollectibleKey(normalKeySpot, "chave", "normal");
-  scene.masterKeyItem = addCollectibleKey(masterKeySpot, "chaveMestra", "master");
+  scene.keyItem = addCollectible(normalKeySpot, "chave", "normal", 20, 42);
+  scene.masterKeyItem = addCollectible(
+    masterKeySpot,
+    "chaveMestra",
+    "master",
+    20,
+    42,
+  );
+  scene.crowbarItem = addCollectible(
+    crowbarSpot,
+    "peDeCabra",
+    "crowbar",
+    36,
+    24,
+  );
   // A chave mestra so pode ser vista/coletada depois da chave comum.
   scene.masterKeyItem.setVisible(false);
   scene.masterKeyItem.body.enable = false;
@@ -420,10 +443,12 @@ export function buildMap(scene, { NavGrid, VENT_PAIRS }) {
   scene.spawnSingleCat(setup ? setup.cat : null);
 
   // SAIDA
-  scene.exit = scene.add.rectangle(EXIT_POS.x, EXIT_POS.y, 70, 90, 0x522d2d);
-  scene.exit.setStrokeStyle(4, 0x98756b);
+  scene.exit = scene.add
+    .image(EXIT_POS.x, EXIT_POS.y, "portaMaster")
+    .setDisplaySize(92, 144);
   scene.exit.setDepth(scene.worldDepth(EXIT_POS.y + 45));
   scene.physics.add.existing(scene.exit, true);
+  scene.exit.body.setSize(70, 90);
 
   scene.physics.add.overlap(scene.player, scene.exit, () => {
     if (scene.gameOver || scene.localDead) return;

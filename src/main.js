@@ -464,10 +464,19 @@ class AsylumScene extends Phaser.Scene {
     this.load.image("insideTiles", "assets/mapa/Inside_C.png");
     this.load.image("chave", "assets/mapa/itens/chave.png");
     this.load.image("chaveMestra", "assets/mapa/itens/chaveMestra.png");
+    this.load.image("peDeCabra", "assets/mapa/itens/peDeCabra.png");
+    this.load.image("portaMaster", "assets/mapa/portaMaster.png");
     this.load.audio("ambiente", "assets/mapa/audios/ambiente.mp3");
+    this.load.audio("portaAbrindo", "assets/mapa/audios/portaAbrindo.mp3");
+    this.load.audio("portaFechando", "assets/mapa/audios/portaFechando.mp3");
+    this.load.audio("portaQuebrando", "assets/mapa/audios/portaQuebrando.mp3");
 
     this.load.audio("passos", "assets/personagens/player/audios/passos.mp3");
     this.load.audio("corrida", "assets/personagens/player/audios/corrida.mp3");
+    this.load.audio(
+      "batimentosCardiacos",
+      "assets/personagens/player/audios/batimentosCardiacos.mp3",
+    );
 
     this.load.audio("gritoFreira", "assets/personagens/freira/audios/gritoFeira.mp3");
     this.load.audio("chase", "assets/personagens/freira/audios/chase.mp3");
@@ -522,8 +531,16 @@ class AsylumScene extends Phaser.Scene {
     this.screamSound = this.sound.add("gritoFreira", { volume: 0.65 });
     this.ambientMusic = this.sound.add("ambiente", { loop: true, volume: 0.3 });
     this.chaseMusic = this.sound.add("chase", { loop: true, volume: 0.4 });
+    this.doorOpenSound = this.sound.add("portaAbrindo", { volume: 0.45 });
+    this.doorCloseSound = this.sound.add("portaFechando", { volume: 0.45 });
+    this.doorBreakSound = this.sound.add("portaQuebrando", { volume: 0.65 });
+    this.heartbeatSound = this.sound.add("batimentosCardiacos", {
+      loop: true,
+      volume: 0,
+    });
     this.hasKey = false;
     this.hasMasterKey = false;
+    this.hasCrowbar = false;
     this.catMeowSound = this.sound.add("catMeow", { volume: 0.2 });
     this.catAngrySound = this.sound.add("catAngry", { volume: 0.25 });
     this.catScratchSound = this.sound.add("catScratch", { volume: 0.18 });
@@ -629,15 +646,15 @@ class AsylumScene extends Phaser.Scene {
     );
     attachMobileControls(this); // celular: joystick e botoes viram teclas
 
-    // HOTBAR: nove espacos centralizados na parte inferior, como no Minecraft.
+    // HOTBAR: dois espacos para as chaves.
     this.hotbar = this.add.graphics().setScrollFactor(0).setDepth(99);
     const hotbarSlotSize = 44;
     const hotbarGap = 4;
-    const hotbarWidth = hotbarSlotSize * 9 + hotbarGap * 8;
+    const hotbarWidth = hotbarSlotSize * 2 + hotbarGap;
     const hotbarX = (this.scale.width - hotbarWidth) / 2;
     const hotbarY = this.scale.height - hotbarSlotSize - 14;
 
-    for (let slot = 0; slot < 9; slot++) {
+    for (let slot = 0; slot < 2; slot++) {
       const x = hotbarX + slot * (hotbarSlotSize + hotbarGap);
       this.hotbar.fillStyle(0x171716, 0.82);
       this.hotbar.fillRect(x, hotbarY, hotbarSlotSize, hotbarSlotSize);
@@ -1050,6 +1067,7 @@ class AsylumScene extends Phaser.Scene {
   }
 
   setDoorOpen(door, open, fromNet = false) {
+    if (door.isOpen === open) return;
     door.isOpen = open;
     door.setVisible(!open);
     door.body.enable = !open;
@@ -1061,6 +1079,7 @@ class AsylumScene extends Phaser.Scene {
     }
 
     this.rebuildObstacles();
+    (open ? this.doorOpenSound : this.doorCloseSound).play();
     if (this.mp && !fromNet) this.netSendDoor(door);
   }
 
@@ -1087,10 +1106,10 @@ class AsylumScene extends Phaser.Scene {
     else if (this.isClientMp) net.sendToHost(msg);
   }
 
-  applyDoorState(index, open, locked) {
+  applyDoorState(index, open, locked, fromNet = true) {
     const door = this.doors[index];
     if (!door) return;
-    if (!locked && door.isLocked) this.unlockDoor(door);
+    if (locked !== door.isLocked) this.setDoorLocked(door, locked, fromNet);
     if (door.isOpen !== open) this.setDoorOpen(door, open, true);
   }
 
@@ -1140,7 +1159,11 @@ class AsylumScene extends Phaser.Scene {
   // coleta de chave: compartilhada por toda a equipe
   collectKey(which, opts = {}) {
     if (this.gameOver) return;
-    const item = which === "master" ? this.masterKeyItem : this.keyItem;
+    const item = {
+      normal: this.keyItem,
+      master: this.masterKeyItem,
+      crowbar: this.crowbarItem,
+    }[which];
     if (!item || item.collected) return;
 
     item.collected = true;
@@ -1158,17 +1181,23 @@ class AsylumScene extends Phaser.Scene {
         this.masterKeyItem.setVisible(true);
         this.masterKeyItem.body.enable = true;
       }
-      this.catGuideTarget = this.masterKeySpot;
+      this.catGuideTarget = this.hasCrowbar
+        ? this.masterKeySpot
+        : this.crowbarSpot;
       this.normalKeyIndicator.setVisible(true);
       this.say(
         "A equipe encontrou a chave das portas! A freira ouviu o barulho...",
         5000,
       );
-    } else {
+    } else if (which === "master") {
       this.hasMasterKey = true;
       this.masterKeyIndicator.setVisible(true);
       this.catGuideTarget = { x: 2290, y: 1470 };
       this.say("A chave mestra foi encontrada. Alcancem a saida!", 5000);
+    } else {
+      this.hasCrowbar = true;
+      if (this.hasKey) this.catGuideTarget = this.masterKeySpot;
+      this.say("Você encontrou o pé de cabra. Agora pode usar os dutos.", 4000);
     }
 
     // efeitos na IA: so o host (ou o jogo solo) mexe na freira e na dificuldade
@@ -1200,22 +1229,67 @@ class AsylumScene extends Phaser.Scene {
 
   onPlayerCaught(id, message) {
     if (!this.mp) {
+      this.playJumpscare();
       this.finish(false, message);
       return;
     }
     this.killPlayer(id, message);
   }
 
-  unlockDoor(door) {
-    door.isLocked = false;
-    door.setFillStyle(0x966033);
-    door.setStrokeStyle(4, 0xf0c778);
+  playJumpscare() {
+    if (this.jumpscareVideo) return;
 
-    if (door.lockIcon) {
+    const video = document.createElement("video");
+    video.src = "assets/personagens/freira/jumpscare.mp4";
+    video.autoplay = true;
+    video.playsInline = true;
+    video.setAttribute("aria-hidden", "true");
+    Object.assign(video.style, {
+      position: "absolute",
+      inset: "0",
+      width: "100%",
+      height: "100%",
+      objectFit: "cover",
+      zIndex: "1000",
+      background: "#000",
+    });
+
+    document.querySelector("#game").appendChild(video);
+    this.jumpscareVideo = video;
+    video.addEventListener("ended", () => video.remove(), { once: true });
+    video.play().catch(() => {
+      video.muted = true;
+      video.play().catch(() => video.remove());
+    });
+  }
+
+  unlockDoor(door) {
+    this.setDoorLocked(door, false);
+  }
+
+  setDoorLocked(door, locked, fromNet = false) {
+    door.isLocked = locked;
+    door.setFillStyle(locked ? 0x792e32 : 0x966033);
+    door.setStrokeStyle(4, locked ? 0xff5555 : 0xf0c778);
+
+    if (locked && !door.lockIcon) {
+      const icon = this.add
+        .text(door.x, door.y, "\u{1F512}", {
+          fontSize: "18px",
+          backgroundColor: "#351719",
+          padding: { x: 3, y: 2 },
+        })
+        .setOrigin(0.5)
+        .setDepth(door.depth + 0.02);
+      door.lockIcon = icon;
+      door.decorations.push(icon);
+    } else if (!locked && door.lockIcon) {
       door.decorations = door.decorations.filter((d) => d !== door.lockIcon);
       door.lockIcon.destroy();
       door.lockIcon = null;
     }
+    if (locked && !fromNet) this.doorCloseSound.play();
+    if (this.mp && !fromNet) this.netSendDoor(door);
   }
 
   // nao deixa fechar a porta com alguem em cima
@@ -1255,6 +1329,12 @@ class AsylumScene extends Phaser.Scene {
 
       this.setDoorOpen(door, false);
       this.say("Você fechou a porta.");
+      return;
+    }
+
+    if (!door.isLocked && this.hasKey) {
+      this.setDoorLocked(door, true);
+      this.say("Você trancou a porta.");
       return;
     }
 
@@ -1402,6 +1482,11 @@ class AsylumScene extends Phaser.Scene {
 
     if (now < this.ventCooldownUntil) return;
 
+    if (!this.hasCrowbar) {
+      this.say("O duto está preso. Encontre o pé de cabra.");
+      return;
+    }
+
     if (this.breath < 25) {
       this.say("Você está sem fôlego para entrar agora.");
       return;
@@ -1545,13 +1630,19 @@ class AsylumScene extends Phaser.Scene {
       const door = this.getNearbyDoor(55);
 
       if (vent) {
-        text = "E — ENTRAR NA VENTILAÇÃO";
+        text = this.hasCrowbar
+          ? "E — ENTRAR NA VENTILAÇÃO"
+          : "DUTO PRESO - ENCONTRE O PÉ DE CABRA";
       } else if (door) {
         text = door.isOpen
           ? "E — FECHAR PORTA"
           : door.isLocked && !this.hasKey
             ? "PORTA TRANCADA - ENCONTRE A CHAVE COMUM"
-            : "E — ABRIR PORTA";
+            : door.isLocked
+              ? "E — DESTRANCAR E ABRIR"
+              : this.hasKey
+                ? "E — TRANCAR PORTA"
+                : "E — ABRIR PORTA";
       }
     }
 
@@ -2222,6 +2313,14 @@ class AsylumScene extends Phaser.Scene {
     this.heart.setScale(
       1 + fear * 0.2 * Math.abs(Math.sin(time * (0.006 + 0.01 * fear))),
     );
+    const heartbeatActive = this.gameStarted && !this.gameOver && fear > 0.08;
+    if (heartbeatActive) {
+      if (!this.heartbeatSound.isPlaying) this.heartbeatSound.play();
+      this.heartbeatSound.setVolume(0.15 + fear * 0.65);
+      this.heartbeatSound.setRate(0.8 + fear * 0.8);
+    } else if (this.heartbeatSound.isPlaying) {
+      this.heartbeatSound.stop();
+    }
 
     this.updateLighting(time, fear);
     this.drawStamina();
@@ -2261,6 +2360,7 @@ class AsylumScene extends Phaser.Scene {
     if (this.crawlTween) this.crawlTween.stop();
     this.ambientMusic.stop();
     this.chaseMusic.stop();
+    this.heartbeatSound.stop();
     this.player.setVisible(true);
     this.footstepSound.stop();
     this.runningSound.stop();
@@ -2811,6 +2911,7 @@ class AsylumScene extends Phaser.Scene {
 
   markLocalDead(message) {
     if (this.localDead) return;
+    this.playJumpscare();
     this.localDead = true;
     if (this.crawlTween) {
       this.crawlTween.stop();
