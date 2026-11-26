@@ -1110,7 +1110,12 @@ class AsylumScene extends Phaser.Scene {
   applyDoorState(index, open, locked, fromNet = true) {
     const door = this.doors[index];
     if (!door) return;
-    if (locked !== door.isLocked) this.setDoorLocked(door, locked, fromNet);
+    if (locked !== door.isLocked) {
+      const newlyLocked = locked && !door.isLocked;
+      this.setDoorLocked(door, locked, fromNet);
+      // No multiplayer, a trava feita por outro jogador chega ao host por aqui.
+      if (newlyLocked && fromNet && this.isHostMp) this.eventDifficulty(0.5);
+    }
     if (door.isOpen !== open) this.setDoorOpen(door, open, true);
   }
 
@@ -1205,6 +1210,7 @@ class AsylumScene extends Phaser.Scene {
     if (this.mp && !this.isHostMp) return;
     this.difficultyItems++;
     this.eventDifficulty(ENEMY_DIFFICULTY.itemGain);
+    if (which === "crowbar") this.eventDifficulty(0.5);
     this.teamStats.keyTimes[which] = this.teamStats.playSeconds;
 
     if (which === "normal" && this.nunState === "patrol") {
@@ -1230,15 +1236,17 @@ class AsylumScene extends Phaser.Scene {
 
   onPlayerCaught(id, message) {
     if (!this.mp) {
-      this.playJumpscare();
-      this.finish(false, message);
+      this.playJumpscare(() => this.finish(false, message));
       return;
     }
     this.killPlayer(id, message);
   }
 
-  playJumpscare() {
-    if (this.jumpscareVideo) return;
+  playJumpscare(onComplete = () => {}) {
+    if (this.jumpscareVideo) {
+      this.jumpscareVideo.remove();
+      this.jumpscareVideo = null;
+    }
 
     const video = document.createElement("video");
     video.src = "assets/personagens/freira/jumpscare.mp4";
@@ -1257,10 +1265,19 @@ class AsylumScene extends Phaser.Scene {
 
     document.querySelector("#game").appendChild(video);
     this.jumpscareVideo = video;
-    video.addEventListener("ended", () => video.remove(), { once: true });
+    let completed = false;
+    const complete = () => {
+      if (completed) return;
+      completed = true;
+      video.remove();
+      if (this.jumpscareVideo === video) this.jumpscareVideo = null;
+      onComplete();
+    };
+    video.addEventListener("ended", complete, { once: true });
+    video.addEventListener("error", complete, { once: true });
     video.play().catch(() => {
       video.muted = true;
-      video.play().catch(() => video.remove());
+      video.play().catch(complete);
     });
   }
 
@@ -1315,6 +1332,7 @@ class AsylumScene extends Phaser.Scene {
       return;
     }
     this.setDoorLocked(door, true);
+    this.eventDifficulty(0.5);
     this.say("Você trancou a porta.");
   }
 
@@ -1459,7 +1477,14 @@ class AsylumScene extends Phaser.Scene {
 
   // tecla ESPACO: rastejar ate a outra ponta
   onSpacePressed() {
-    if (this.gameOver || this.debugCommandFocused || net.lobbyOpen) return;
+    if (this.debugCommandFocused || net.lobbyOpen) return;
+
+    if (this.gameOver) {
+      if (this.isClientMp) return;
+      if (this.isHostMp) this.startMultiplayerAsHost();
+      else this.scene.restart();
+      return;
+    }
 
     if (!this.gameStarted) {
       // dentro de uma sala, quem inicia a partida e o host pelo lobby
@@ -2463,6 +2488,15 @@ class AsylumScene extends Phaser.Scene {
       if (this.isHostMp) this.startMultiplayerAsHost();
       else this.scene.restart();
     });
+
+    this.add
+      .text(this.scale.width / 2, 380, "Pressione ESPAÇO para recomeçar", {
+        fontSize: "14px",
+        color: "#cccccc",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(202);
   }
 
   // ---------------------------------------------------------------
