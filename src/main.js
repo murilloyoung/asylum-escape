@@ -1236,52 +1236,10 @@ class AsylumScene extends Phaser.Scene {
 
   onPlayerCaught(id, message) {
     if (!this.mp) {
-      this.playJumpscare(() => this.finish(false, message));
+      this.finish(false, message);
       return;
     }
     this.killPlayer(id, message);
-  }
-
-  playJumpscare(onComplete = () => {}) {
-    if (this.jumpscareVideo) {
-      this.jumpscareVideo.remove();
-      this.jumpscareVideo = null;
-    }
-
-    const video = document.createElement("video");
-    video.src = "assets/personagens/freira/jumpscare.mp4";
-    video.autoplay = true;
-    video.playsInline = true;
-    video.setAttribute("playsinline", "");
-    // Capturas não vêm de um clique; começar sem áudio permite autoplay nos navegadores.
-    video.muted = true;
-    video.preload = "auto";
-    video.setAttribute("aria-hidden", "true");
-    Object.assign(video.style, {
-      position: "fixed",
-      inset: "0",
-      width: "100%",
-      height: "100%",
-      objectFit: "cover",
-      zIndex: "10000",
-      background: "#000",
-    });
-
-    // Fica acima do canvas Phaser em navegadores que criam camadas próprias para vídeo.
-    document.body.appendChild(video);
-    this.jumpscareVideo = video;
-    let completed = false;
-    const complete = () => {
-      if (completed) return;
-      completed = true;
-      video.remove();
-      if (this.jumpscareVideo === video) this.jumpscareVideo = null;
-      onComplete();
-    };
-    video.addEventListener("ended", complete, { once: true });
-    video.play().catch(() => {
-      video.play().catch(complete);
-    });
   }
 
   unlockDoor(door) {
@@ -2970,7 +2928,6 @@ class AsylumScene extends Phaser.Scene {
 
   markLocalDead(message) {
     if (this.localDead) return;
-    this.playJumpscare();
     this.localDead = true;
     if (this.crawlTween) {
       this.crawlTween.stop();
