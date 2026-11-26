@@ -362,11 +362,34 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
     const chaseSpeed =
       tune.chaseSpeed + (this.hasKey ? tune.chaseSpeedWithKeyBonus : 0);
 
-    // A FREIRA ABRE PORTAS DESTRANCADAS
+    // A freira arromba portas trancadas quando esta perseguindo alguem.
     for (const door of this.doors) {
-      if (door.isOpen || door.isLocked) continue;
+      if (door.isOpen) continue;
 
-      if (this.distanceToDoor(door, nun.x, nun.y) < 40) {
+      const doorDistance = this.distanceToDoor(door, nun.x, nun.y);
+      if (door.isLocked && this.nunState === "chase" && dist < 260 && doorDistance < 40) {
+        if (!door.breakStartedAt) {
+          door.breakStartedAt = now;
+          this.doorBreakSound.play();
+        }
+
+        const breaking = Math.min(1, (now - door.breakStartedAt) / 1800);
+        door.setAlpha(0.65 + Math.abs(Math.sin(now * 0.04)) * 0.35);
+        if (breaking >= 1) {
+          door.setAlpha(1);
+          door.breakStartedAt = 0;
+          this.setDoorLocked(door, false);
+          this.setDoorOpen(door, true);
+          this.say("A freira arrombou uma porta!", 2500);
+        }
+        continue;
+      }
+
+      door.breakStartedAt = 0;
+      door.setAlpha(1);
+      if (door.isLocked) continue;
+
+      if (doorDistance < 40) {
         this.setDoorOpen(door, true);
 
         if (dist < 520) this.say("Uma porta se abriu por perto...", 2500);
