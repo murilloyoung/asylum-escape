@@ -1252,21 +1252,23 @@ class AsylumScene extends Phaser.Scene {
     video.src = "assets/personagens/freira/jumpscare.mp4";
     video.autoplay = true;
     video.playsInline = true;
+    video.setAttribute("playsinline", "");
     // Capturas não vêm de um clique; começar sem áudio permite autoplay nos navegadores.
     video.muted = true;
     video.preload = "auto";
     video.setAttribute("aria-hidden", "true");
     Object.assign(video.style, {
-      position: "absolute",
+      position: "fixed",
       inset: "0",
       width: "100%",
       height: "100%",
       objectFit: "cover",
-      zIndex: "1000",
+      zIndex: "10000",
       background: "#000",
     });
 
-    document.querySelector("#game").appendChild(video);
+    // Fica acima do canvas Phaser em navegadores que criam camadas próprias para vídeo.
+    document.body.appendChild(video);
     this.jumpscareVideo = video;
     let completed = false;
     const complete = () => {
