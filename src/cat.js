@@ -10,6 +10,9 @@ const CAT_WALK_SPEED = 72;
 const CAT_GUIDE_REACH = 58; // perto o bastante do alvo para parar e arranhar
 const CAT_WAYPOINT_REACH = 12;
 const CAT_WORLD_MARGIN = 24;
+const CAT_STUCK_CHECK_MS = 700;
+const CAT_STUCK_MIN_MOVEMENT = 8;
+const CAT_STUCK_ESCAPE_MS = 350;
 // Se a fuga em linha reta (oposta a freira) nao tem caminho, tenta desviar em angulos diferentes.
 const CAT_FLEE_ANGLE_OFFSETS = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8];
 const CAT_SKINS = ["catGrey", "catGinger", "catMilena"];
@@ -142,6 +145,11 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
       cat.path = [];
       cat.dest = null;
       cat.repathAt = 0;
+      cat.stuckCheckAt = now + CAT_STUCK_CHECK_MS;
+      cat.stuckCheckX = spot.x;
+      cat.stuckCheckY = spot.y;
+      cat.stuckUntil = 0;
+      cat.stuckSide = 1;
       cat.fleeUntil = 0;
       cat.meowAt = now + Phaser.Math.Between(4000, 9000);
       cat.scratchAt = now + Phaser.Math.Between(3000, 6000);
@@ -178,6 +186,28 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
 
         cat.setDepth(this.worldDepth(cat.y));
 
+        if (now >= cat.stuckCheckAt) {
+          const velocity = cat.body.velocity;
+          const tryingToMove = Math.hypot(velocity.x, velocity.y) > 20;
+          const moved = Phaser.Math.Distance.Between(
+            cat.x,
+            cat.y,
+            cat.stuckCheckX,
+            cat.stuckCheckY,
+          );
+          if (tryingToMove && moved < CAT_STUCK_MIN_MOVEMENT) {
+            const movementAngle = Math.atan2(velocity.y, velocity.x);
+            cat.stuckSide *= -1;
+            cat.stuckAngle = movementAngle + cat.stuckSide * Math.PI * 0.5;
+            cat.stuckUntil = now + CAT_STUCK_ESCAPE_MS;
+            cat.path = [];
+            cat.repathAt = cat.stuckUntil;
+          }
+          cat.stuckCheckX = cat.x;
+          cat.stuckCheckY = cat.y;
+          cat.stuckCheckAt = now + CAT_STUCK_CHECK_MS;
+        }
+
         const distanceToNun = Phaser.Math.Distance.Between(
           cat.x,
           cat.y,
@@ -212,6 +242,22 @@ export function installCatMethods(Scene, ENEMY_DIFFICULTY) {
         }
         if (!fleeing) cat.angryPlayed = false;
         cat.wasScared = fleeing;
+
+        if (now < cat.stuckUntil) {
+          const speed = fleeing ? CAT_FLEE_SPEED : CAT_WALK_SPEED;
+          const vx = Math.cos(cat.stuckAngle) * speed;
+          cat.body.setVelocity(vx, Math.sin(cat.stuckAngle) * speed);
+          const moveAnimation = fleeing ? cat.runAnimation : cat.walkAnimation;
+          if (cat.scratchPlaying) {
+            cat.sprite.stop();
+            cat.scratchPlaying = false;
+          }
+          if (cat.sprite.anims.currentAnim?.key !== moveAnimation) {
+            cat.sprite.play(moveAnimation);
+          }
+          if (Math.abs(vx) > 5) cat.sprite.setFlipX(vx < 0);
+          continue;
+        }
 
         if (!fleeing && now >= cat.meowAt) {
           if (playerCanHearCat && now >= this.catSoundCooldown) {
