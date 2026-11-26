@@ -1236,10 +1236,49 @@ class AsylumScene extends Phaser.Scene {
 
   onPlayerCaught(id, message) {
     if (!this.mp) {
-      this.finish(false, message);
+      if (this.captureInProgress) return;
+      this.captureInProgress = true;
+      this.playJumpscare(() => {
+        this.captureInProgress = false;
+        this.finish(false, message);
+      });
       return;
     }
     this.killPlayer(id, message);
+  }
+
+  playJumpscare(onComplete) {
+    const video = document.createElement("video");
+    video.src = "assets/personagens/freira/jumpscare.mp4";
+    video.autoplay = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("aria-hidden", "true");
+    video.muted = true;
+    video.preload = "auto";
+    Object.assign(video.style, {
+      position: "fixed",
+      inset: "0",
+      width: "100%",
+      height: "100%",
+      objectFit: "cover",
+      zIndex: "10000",
+      background: "#000",
+    });
+
+    document.body.appendChild(video);
+    this.jumpscareVideo = video;
+    let completed = false;
+    const complete = () => {
+      if (completed) return;
+      completed = true;
+      video.remove();
+      if (this.jumpscareVideo === video) this.jumpscareVideo = null;
+      onComplete();
+    };
+    video.addEventListener("ended", complete, { once: true });
+    video.addEventListener("error", complete, { once: true });
+    video.play().catch(() => video.play().catch(complete));
   }
 
   unlockDoor(door) {
