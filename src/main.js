@@ -625,7 +625,7 @@ class AsylumScene extends Phaser.Scene {
 
     // CONTROLES
     this.keys = this.input.keyboard.addKeys(
-      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,F,SPACE",
+      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SHIFT,E,R,F,SPACE",
     );
     attachMobileControls(this); // celular: joystick e botoes viram teclas
 
@@ -672,8 +672,9 @@ class AsylumScene extends Phaser.Scene {
       this.lastPointerMoveAt = this.time.now;
     });
 
-    // TECLA E: ABRIR E FECHAR PORTAS
+    // E interage com portas e ventilações; R tranca uma porta fechada.
     this.input.keyboard.on("keydown-E", () => this.onInteract());
+    this.input.keyboard.on("keydown-R", () => this.onLockDoor());
     this.input.keyboard.on("keydown-F", () => {
       this.flashlightOn = !this.flashlightOn;
       this.say(`Lanterna ${this.flashlightOn ? "ligada" : "desligada"}.`, 1400);
@@ -903,7 +904,7 @@ class AsylumScene extends Phaser.Scene {
       }),
     );
     add(
-      this.add.text(80, 513, "E  interagir     ESPAÇO  rastejar", {
+      this.add.text(80, 513, "E  interagir     R  trancar porta     ESPAÇO  rastejar", {
         fontFamily: "Arial",
         fontSize: "13px",
         color: "#8f8d88",
@@ -1090,7 +1091,8 @@ class AsylumScene extends Phaser.Scene {
   applyDoorState(index, open, locked) {
     const door = this.doors[index];
     if (!door) return;
-    if (!locked && door.isLocked) this.unlockDoor(door);
+    if (locked && !door.isLocked) this.lockDoor(door, true);
+    if (!locked && door.isLocked) this.unlockDoor(door, true);
     if (door.isOpen !== open) this.setDoorOpen(door, open, true);
   }
 
@@ -1206,7 +1208,25 @@ class AsylumScene extends Phaser.Scene {
     this.killPlayer(id, message);
   }
 
-  unlockDoor(door) {
+  lockDoor(door, fromNet = false) {
+    if (door.isOpen) return false;
+    door.isLocked = true;
+    door.setFillStyle(0x792e32);
+    door.setStrokeStyle(4, 0xff5555);
+
+    if (!door.lockIcon) {
+      const lock = this.add.text(door.x, door.y, "🔒", {
+        fontSize: "14px",
+      }).setOrigin(0.5).setDepth(door.depth + 0.02);
+      door.lockIcon = lock;
+      door.decorations.push(lock);
+    }
+    door.lockIcon.setVisible(true);
+    if (this.mp && !fromNet) this.netSendDoor(door);
+    return true;
+  }
+
+  unlockDoor(door, fromNet = false) {
     door.isLocked = false;
     door.setFillStyle(0x966033);
     door.setStrokeStyle(4, 0xf0c778);
@@ -1216,6 +1236,32 @@ class AsylumScene extends Phaser.Scene {
       door.lockIcon.destroy();
       door.lockIcon = null;
     }
+    if (this.mp && !fromNet) this.netSendDoor(door);
+  }
+
+  onLockDoor() {
+    if (
+      this.gameOver ||
+      !this.gameStarted ||
+      this.debugCommandFocused ||
+      this.localDead
+    ) return;
+
+    const door = this.getNearbyDoor(55);
+    if (!door) {
+      this.say("Chegue perto de uma porta fechada para usar R.");
+      return;
+    }
+    if (door.isOpen) {
+      this.say("Feche a porta com E antes de trancá-la.");
+      return;
+    }
+    if (door.isLocked) {
+      this.say("Esta porta já está trancada.");
+      return;
+    }
+    this.lockDoor(door);
+    this.say("Você trancou a porta.");
   }
 
   // nao deixa fechar a porta com alguem em cima
@@ -1551,7 +1597,9 @@ class AsylumScene extends Phaser.Scene {
           ? "E — FECHAR PORTA"
           : door.isLocked && !this.hasKey
             ? "PORTA TRANCADA - ENCONTRE A CHAVE COMUM"
-            : "E — ABRIR PORTA";
+            : door.isLocked
+              ? "E — DESTRANCAR E ABRIR"
+              : "E — ABRIR  ·  R — TRANCAR";
       }
     }
 
@@ -1961,6 +2009,8 @@ class AsylumScene extends Phaser.Scene {
 
     this.input.keyboard.addCapture("F3");
     this.input.keyboard.on("keydown-F3", () => this.toggleEnemyDebug());
+    this.input.keyboard.addCapture("X");
+    this.input.keyboard.on("keydown-X", () => this.toggleEnemyDebug());
     this.input.keyboard.on("keydown-ESC", () => this.leaveMatch());
     this.input.keyboard.on("keydown", (event) =>
       this.handleDebugCommandKey(event),
