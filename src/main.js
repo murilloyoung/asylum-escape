@@ -1252,6 +1252,9 @@ class AsylumScene extends Phaser.Scene {
     video.src = "assets/personagens/freira/jumpscare.mp4";
     video.autoplay = true;
     video.playsInline = true;
+    // Capturas não vêm de um clique; começar sem áudio permite autoplay nos navegadores.
+    video.muted = true;
+    video.preload = "auto";
     video.setAttribute("aria-hidden", "true");
     Object.assign(video.style, {
       position: "absolute",
@@ -1274,9 +1277,7 @@ class AsylumScene extends Phaser.Scene {
       onComplete();
     };
     video.addEventListener("ended", complete, { once: true });
-    video.addEventListener("error", complete, { once: true });
     video.play().catch(() => {
-      video.muted = true;
       video.play().catch(complete);
     });
   }
