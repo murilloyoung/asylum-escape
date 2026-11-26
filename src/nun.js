@@ -436,7 +436,13 @@ export function installNunMethods(Scene, ENEMY_DIFFICULTY) {
       case "chase": {
         const target = seesPlayer ? { x: seen.x, y: seen.y } : this.nunLastSeen;
 
-        if (now >= this.nunRepathAt) {
+        // Perto o bastante para capturar, segue direto e evita bloquear o frame
+        // com um A* justamente antes do callback de colisão.
+        if (seesPlayer && seenDist <= 70) {
+          this.nunPath = [];
+          this.nunPathFailed = true;
+          this.nunRepathAt = now + tune.repathMs;
+        } else if (now >= this.nunRepathAt) {
           this.setNunDestination(target.x, target.y);
           this.nunRepathAt = now + tune.repathMs;
         }
